@@ -134,6 +134,62 @@ impl<'w> Sides<'w> {
     }
 }
 
+/// The hierarchy specs are resolved against: side B's dump when two files are
+/// given, side A's otherwise.
+pub(crate) fn hierarchy_of<'w>(a: &'w Waveform, b: Option<&'w Waveform>) -> &'w Waveform {
+    b.unwrap_or(a)
+}
+
+/// Resolve one spec on the given side, prefixing failures with `flag`.
+pub(crate) fn resolve_on(
+    wf_a: &Waveform,
+    wf_b: Option<&Waveform>,
+    side: Side,
+    ctx: &crate::resolve::ResolveCtx<'_>,
+    spec: &str,
+    flag: &str,
+) -> Result<SigHandle> {
+    let h = match side {
+        Side::A => wf_a.hierarchy(),
+        Side::B => hierarchy_of(wf_a, wf_b).hierarchy(),
+    };
+    Ok(crate::resolve::resolve_sig(h, ctx, spec)
+        .map_err(|e| anyhow::anyhow!("{flag}: {e}"))?
+        .on_side(side))
+}
+
+/// [`resolve_on`] for an optional spec (`--anchor`-style flags).
+pub(crate) fn resolve_flag(
+    wf_a: &Waveform,
+    wf_b: Option<&Waveform>,
+    side: Side,
+    ctx: &crate::resolve::ResolveCtx<'_>,
+    spec: Option<&String>,
+    flag: &str,
+) -> Result<Option<SigHandle>> {
+    match spec {
+        None => Ok(None),
+        Some(spec) => Ok(Some(resolve_on(wf_a, wf_b, side, ctx, spec, flag)?)),
+    }
+}
+
+/// Origin of side B: one dump means one timeline — B shares A's origin unless the
+/// user asked for an explicit skew (`--b-anchor`, `--b-cycle-offset`).
+pub fn side_b_origin(
+    shared: bool,
+    origin_a: i64,
+    view_wf_b: &Waveform,
+    clock_b: &ClockInfo,
+    anchor_b: Option<&SigHandle>,
+    b_cycle_offset: i64,
+) -> Result<i64> {
+    if shared && !(anchor_b.is_some() || b_cycle_offset != 0) {
+        Ok(origin_a)
+    } else {
+        resolve_origin(Side::B, view_wf_b, clock_b, anchor_b, b_cycle_offset)
+    }
+}
+
 /// Resolve the origin of one side: anchor (`first local cycle where NAME is 1`)
 /// plus an explicit cycle offset.
 pub fn resolve_origin(

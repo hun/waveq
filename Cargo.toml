@@ -2,7 +2,7 @@
 name = "waveq"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "CLI waveform-query tool for VCD/FST/GHW dumps"
 license = "MIT OR Apache-2.0"
 
@@ -23,6 +23,7 @@ toml = { version = "1.1", features = ["preserve_order"] }
 glob = "0.3"
 indexmap = { version = "2", features = ["serde"] }
 anyhow = "1"
+mlua = { version = "0.12", features = ["lua54", "vendored", "serde", "anyhow"] }
 
 [profile.release]
 lto = "thin"

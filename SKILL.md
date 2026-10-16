@@ -173,6 +173,8 @@ under their own key/record name.
 | `align` | shift scan: mismatches per candidate shift |
 | `compare` | compare pairs, report every divergent cycle/transfer |
 | `cut` | write a cycle window of a dump as a small VCD |
+| `run FILE\|@NAME` | run a Lua script (`[scripts]` entry with `@NAME`) |
+| `eval CODE` | run inline Lua |
 
 ### info
 
@@ -408,6 +410,82 @@ pair a            b         shift align  compared mismatches x_involved skipped 
   compared width is an error, not a silent skip) and cycles the file does not
   cover are counted as `skipped`, never as matches.
 
+### run / eval
+
+The declarative commands answer questions that already have a flag. For the
+data-dependent ones — "first cycle where `out != f(inputs[-3:])`", a hand-rolled
+scoreboard, a sweep over a knob — run Lua 5.4 against the loaded dump:
+
+```sh
+waveq -f dump.vcd eval 'local y = wave.signal("tb_top.ref_y")
+  wave.emit{cycle = 13, value = y:value(13), int = y:int(13)}
+  return y:int(13) == 56'
+# rows: {"cycle": 13, "value": "038", "int": 56}
+```
+
+`run FILE` runs a file, `run @NAME` a `[scripts]` entry, `eval CODE` inline
+code. Emitted rows go through the normal document printer, so `--format
+text|json|jsonl` behave as elsewhere.
+
+```
+wave.sides()                     -- {'a'} or {'a','b'}
+wave.path([side])  wave.info()
+wave.clock([side])               -- same fields as `clock --format json`
+wave.cycles([side])  wave.last_cycle([side])
+wave.tick(cycle, [side])         -- nil outside 0..=last_cycle
+wave.time(tick)                  -- "135ns"
+wave.signals([pattern], [side])  -- signal records, pattern is a glob
+wave.signal(name, [side])        -- handle: NAME or NAME[msb:lsb]
+
+  handle fields   name spec width signed radix kind direction index
+  handle methods  :at(c)        {cycle, tick, time, value, bits, has_x}
+                  :at_tick(t)   same, without cycle
+                  :bits(c)      canonical bits, nil without a value
+                  :value(c[,radix])  rendered ("auto|bin|hex|oct|dec")
+                  :int(c)       Lua integer, nil for x/z or no value
+                  :is_xz(c)     bool
+                  :changes([from_cycle[, to_cycle]])  ascending by tick
+
+wave.emit(record)  wave.columns{...}  wave.trailer(key, value)  wave.note(msg)
+wave.encode_json(v)  wave.decode_json(s)  wave.read_json(path)
+```
+
+* Cycles are **logical** cycles (local cycle minus the side's origin), exactly
+  like the CLI's `cycle`/`a_cycle`/`b_cycle` columns; `"b"` needs a B side
+  (`--b-file`/`--b-clock`/`--b-anchor`/`--b-cycle-offset`). With
+  `--b-cycle-offset 3`, `wave.signal("q3", "b"):at(10)` is `q3`'s cycle 13.
+* `--clock none` is allowed: tick/time calls work, cycle-indexed ones error
+  (`wave.cycles: no clock (--clock none)`).
+* The first `wave.emit` fixes the column list (from `wave.columns` if called,
+  else the record's sorted keys); a later unknown key is an error and a missing
+  key emits `null`/`-`. `wave.columns` after the first `emit` is an error.
+* Return `nil`/`true` for exit 0, `false` for exit 1; anything else exits 2,
+  as does a script error (with `stack traceback`) — so an `eval` is usable as a
+  check in a shell pipeline.
+* Scripts are untrusted: `io`/`os`/`debug`/`package`/`require`/`loadfile`/
+  `dofile` are absent, `--budget` (default 50M instructions) and `--memory`
+  (default 256 MiB) bound CPU and RAM, and `print` goes to stderr unless
+  `--format text` (stdout stays parseable).
+
+The documented `align` result, recomputed as a script (the class of question
+that would otherwise need a host-language loop):
+
+```sh
+waveq -f dump.vcd eval 'local y, q = wave.signal("tb_top.ref_y"), wave.signal("tb_top.q3")
+  local best, best_m, pairs
+  for s = 0, 8 do local m, n = 0, 0
+    for c = s, 19 do n = n + 1; if y:bits(c - s) ~= q:bits(c) then m = m + 1 end end
+    if best_m == nil or m < best_m then best, best_m, pairs = s, m, n end end
+  wave.emit{shift = best, mismatches = best_m, pairs = pairs}
+  return true'
+# rows: {"shift": 3, "mismatches": 1, "pairs": 17}
+```
+
+[SCRIPTING.md](SCRIPTING.md) is the extended guide: full API reference, cycle and
+signedness semantics, recipes (expression checks, sweeps, transfer-indexed
+scoreboards, x/z audits, golden-JSON joins), performance, and the sharp edges.
+[`scripts/`](scripts) holds six runnable examples with their expected results.
+
 ## Config file (`.waveq.toml`)
 
 Discovered from the CWD upward (stopping at the first ancestor containing
@@ -456,6 +534,9 @@ out_delay = { a = "tb_top.ref_y", b = "tb_top.q3", shift = 3, from_cycle = 0, to
 
 [queries]                    # named table invocations: --query pipeline
 pipeline = { signals = ["tb_top.ref_y", "tb_top.q1"], context = 3 }
+
+[scripts]                    # named run invocations: waveq run @probe
+probe = { file = "scripts/probe.lua" }
 ```
 
 Unknown keys are errors (`unknown config key "x"`). `[checks]` accepts every
@@ -463,7 +544,8 @@ Unknown keys are errors (`unknown config key "x"`). `[checks]` accepts every
 `x`, `gate`, `in_valid`, `in_ready`, `out_valid`, `out_ready`, `from_cycle`,
 `to_cycle`, `from`, `to`, `probe`, `probe_at`, `at_edges_only`, `pairs`,
 `max_delta`, `delta`, `map_glob`, `pair_scopes`, `pair_by`); `[queries]` accepts
-`signals`, `context`, `cycles`, `from_cycle`, `to_cycle`, `at_cycle`.
+`signals`, `context`, `cycles`, `from_cycle`, `to_cycle`, `at_cycle`; `[scripts]`
+entry accepts `file` (used as written, relative to the CWD, like `[wave] file`).
 `[types]` keys are exact signal specs (winner) or globs (first match in file
 order).
 

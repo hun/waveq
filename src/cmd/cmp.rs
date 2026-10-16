@@ -22,7 +22,10 @@ use crate::load;
 use crate::output::{Doc, Field, Table};
 use crate::resolve::{self, SigHandle};
 use crate::sample::{Cell, Val};
-use crate::sides::{Side, SideView, Sides, resolve_origin, resolve_side_clock};
+use crate::sides::{
+    Side, SideView, Sides, hierarchy_of, resolve_flag, resolve_on, resolve_origin,
+    resolve_side_clock, side_b_origin,
+};
 
 use super::{App, fmt_time};
 
@@ -645,41 +648,6 @@ fn scan_transfers(
 // side loading and handle resolution
 // ---------------------------------------------------------------------------
 
-fn hierarchy_of<'w>(a: &'w Waveform, b: Option<&'w Waveform>) -> &'w Waveform {
-    b.unwrap_or(a)
-}
-
-fn resolve_on(
-    wf_a: &Waveform,
-    wf_b: Option<&Waveform>,
-    side: Side,
-    ctx: &resolve::ResolveCtx<'_>,
-    spec: &str,
-    flag: &str,
-) -> Result<SigHandle> {
-    let h = match side {
-        Side::A => wf_a.hierarchy(),
-        Side::B => hierarchy_of(wf_a, wf_b).hierarchy(),
-    };
-    Ok(resolve::resolve_sig(h, ctx, spec)
-        .map_err(|e| anyhow::anyhow!("{flag}: {e}"))?
-        .on_side(side))
-}
-
-fn resolve_flag(
-    wf_a: &Waveform,
-    wf_b: Option<&Waveform>,
-    side: Side,
-    ctx: &resolve::ResolveCtx<'_>,
-    spec: Option<&String>,
-    flag: &str,
-) -> Result<Option<SigHandle>> {
-    match spec {
-        None => Ok(None),
-        Some(spec) => Ok(Some(resolve_on(wf_a, wf_b, side, ctx, spec, flag)?)),
-    }
-}
-
 /// Load the needed signals into whichever waveform owns each handle.
 fn load_handles(wf_a: &mut Waveform, wf_b: Option<&mut Waveform>, handles: &[&SigHandle]) {
     let mut ids_a = Vec::new();
@@ -928,15 +896,15 @@ fn load_sides<'w>(
     let path_a = app.require_file()?.clone();
     let view_wf_b = hierarchy_of(wf_a, wf_b);
     let origin_a = resolve_origin(Side::A, wf_a, clock_a, anchor_a, app.cycle_offset)?;
-    // One dump means one timeline: B shares A's origin unless the user asked
-    // for an explicit skew (`--b-anchor`, `--b-cycle-offset`).
     let shared = wf_b.is_none();
-    let b_explicit = anchor_b.is_some() || app.b_cycle_offset != 0;
-    let origin_b = if shared && !b_explicit {
-        origin_a
-    } else {
-        resolve_origin(Side::B, view_wf_b, clock_b, anchor_b, app.b_cycle_offset)?
-    };
+    let origin_b = side_b_origin(
+        shared,
+        origin_a,
+        view_wf_b,
+        clock_b,
+        anchor_b,
+        app.b_cycle_offset,
+    )?;
     Ok(Ctx {
         wf_a,
         wf_b: view_wf_b,

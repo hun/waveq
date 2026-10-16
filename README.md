@@ -16,7 +16,8 @@ cargo install --path .           # or: installs `waveq` into ~/.cargo/bin
 cargo test                       # unit + end-to-end tests, no EDA tools needed
 ```
 
-Requires Rust 1.85+ (edition 2024). Only fixture *regeneration* needs EDA tools
+Requires Rust 1.88+ (edition 2024) and a C compiler: script mode vendors and
+builds Lua 5.4. Only fixture *regeneration* needs EDA tools
 (`tests/fixtures/gen.sh` uses `iverilog`, `vvp`, `vcd2fst`, `ghdl`); the
 generated dumps are committed under `tests/fixtures/data/`.
 
@@ -36,6 +37,8 @@ generated dumps are committed under `tests/fixtures/data/`.
 | `align` | shift scan: mismatch count per candidate shift |
 | `compare` | compare pairs, report every divergent cycle or transfer |
 | `cut` | write a cycle window of a dump as a small VCD |
+| `run FILE\|@NAME` | run a Lua script against the dump |
+| `eval CODE` | run inline Lua against the dump |
 
 Run `waveq --help` or `waveq <command> --help` for the options.
 
@@ -93,6 +96,37 @@ waveq -f big.vcd cut --cycles 2040..2100 --signal 'dut.*,ref.*,tb.ce,tb.rst' -o 
 # 1.97 MB -> 52 KB, same values, same cycle numbers (the clock is kept on purpose)
 ```
 
+## Scripting (`run` / `eval`)
+
+Everything above is declarative: the question has to exist as a flag already.
+For the questions that do not — "first cycle where `out != f(inputs[-3:])`", a
+hand-rolled scoreboard, a sweep over a knob — `run`/`eval` execute a Lua 5.4
+script against the loaded dump through a small frozen `wave` API and emit rows
+through the same document printer:
+
+```sh
+waveq -f $F eval 'local y = wave.signal("tb_top.ref_y")
+  wave.emit{cycle = 13, value = y:value(13), int = y:int(13)}
+  return y:int(13) == 56'
+# {"rows": [{"cycle": 13, "value": "038", "int": 56}]}
+```
+
+* `run FILE` runs a script file, `run @NAME` a `[scripts]` entry, `eval CODE`
+  inline code. `--budget` (default 50M instructions) and `--memory` (default
+  256 MiB; `0` disables either) bound the script.
+* The script returns `nil`/`true` for exit 0 and `false` for exit 1, so a script
+  can be a check; any other return value or a script error exits 2.
+* Scripts are untrusted: no `io`/`os`/`debug`/`package`, and `print` writes to
+  stderr unless `--format text`, so `json`/`jsonl` output stays parseable.
+* `waveq eval --help` lists the API (`wave.signal`/`:at`/`:bits`/`:int`/
+  `:changes`, `wave.signals`, `wave.emit`/`wave.columns`/`wave.trailer`,
+  `wave.clock`/`wave.cycles`/`wave.tick`/`wave.time`, `wave.read_json`).
+  Cycle arguments are logical cycles, and `--b-*` give a script two sides.
+
+[SCRIPTING.md](SCRIPTING.md) is the extended guide (API reference, semantics,
+recipes, performance, limits) and [`scripts/`](scripts) holds six runnable
+examples with their expected results.
+
 ## Configuration
 
 `.waveq.toml` (discovered from the working directory upward, or `--config PATH`)
@@ -104,8 +138,8 @@ for the schema and the precedence rule (CLI flag → named entry → section def
 ## Exit codes
 
 * `0` — success, no divergence
-* `1` — `compare`/`align` found a divergence
-* `2` — usage, IO, parse, config or clock error (message on stderr)
+* `1` — `compare`/`align` found a divergence, or a script returned `false`
+* `2` — usage, IO, parse, config, clock or script error (message on stderr)
 
 ## Big dumps
 
@@ -138,5 +172,8 @@ src/output.rs    text/json/jsonl document model
 src/sides.rs     side A/B views: per-side clock, anchor and cycle offset
 src/expect.rs    expected-value files (CSV/JSONL) as a comparison side
 src/vcd.rs       minimal VCD writer used by `cut`
-src/cmd/         info, scopes, signals, signal, clock, config, value, changes, table, align, compare, cut
+src/script/      script mode: sandboxed Lua 5.4, the `wave` API, budgets
+src/cmd/         info, scopes, signals, signal, clock, config, value, changes, table, align, compare, cut, run, eval
+scripts/         example scripts for run/eval (see SCRIPTING.md)
+tests/           end-to-end CLI, cut and script tests
 ```

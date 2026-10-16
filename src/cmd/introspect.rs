@@ -5,9 +5,10 @@ use serde_json::{Value, json};
 use wellen::{Hierarchy, ScopeRef, VarRef};
 
 use crate::clock::{self, ClockInfo};
+use crate::config::TypeTable;
 use crate::format::{format_time, timescale_text, timscale_unit_name};
 use crate::output::{Doc, Field, Table};
-use crate::resolve::{self, direction_name, parse_sigspec, var_type_name};
+use crate::resolve::{self, SignArgs, direction_name, parse_sigspec, var_type_name};
 use crate::sample;
 use crate::{load, sample::Cell};
 
@@ -217,6 +218,22 @@ fn truncate(table: &mut Table, max_rows: Option<usize>) -> usize {
     }
 }
 
+/// The per-signal JSON record shared by `signals` and the script API.
+pub(crate) fn signal_json(h: &Hierarchy, v: VarRef, sign: &SignArgs, types: &TypeTable) -> Value {
+    let full_name = resolve::var_full_name(h, v);
+    let (signed, source) = resolve::signedness(h, v, &full_name, &full_name, sign, types);
+    json!({
+        "full_name": full_name,
+        "width": h[v].length(h),
+        "var_type": var_type_name(h[v].var_type()),
+        "direction": direction_name(h[v].direction()),
+        "encoding": encoding_text(h, v),
+        "signed": signed,
+        "signed_source": source.name(),
+        "index": h[v].index().map(|i| format!("{}:{}", i.msb(), i.lsb())),
+    })
+}
+
 pub fn signals(
     app: &App,
     matches: &[String],
@@ -252,21 +269,13 @@ pub fn signals(
         kept += 1;
         let width = h[v].length(h);
         let encoding = encoding_text(h, v);
-        let (signed, source) = resolve::signedness(h, v, &full_name, &full_name, &sign, &app.types);
+        let (signed, _source) =
+            resolve::signedness(h, v, &full_name, &full_name, &sign, &app.types);
         let index = h[v]
             .index()
             .map(|i| format!("{}:{}", i.msb(), i.lsb()))
             .unwrap_or_else(|| "-".to_string());
-        let row_json = json!({
-            "full_name": full_name,
-            "width": width,
-            "var_type": var_type_name(h[v].var_type()),
-            "direction": direction_name(h[v].direction()),
-            "encoding": encoding,
-            "signed": signed,
-            "signed_source": source.name(),
-            "index": h[v].index().map(|i| format!("{}:{}", i.msb(), i.lsb())),
-        });
+        let row_json = signal_json(h, v, &sign, &app.types);
         table.push(
             vec![
                 full_name,

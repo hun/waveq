@@ -173,6 +173,15 @@ pub struct QueryCfg {
     pub at_cycle: Option<i64>,
 }
 
+/// A named `run` invocation (`[scripts] NAME`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptCfg {
+    /// Script file, used as written (relative to the process working directory,
+    /// like `[wave] file`).
+    pub file: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -188,6 +197,8 @@ pub struct Config {
     pub checks: Option<IndexMap<String, CheckCfg>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queries: Option<IndexMap<String, QueryCfg>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scripts: Option<IndexMap<String, ScriptCfg>>,
 }
 
 /// Ordered `[types]` table with exact-then-glob lookup semantics.
@@ -316,6 +327,17 @@ impl Config {
             .unwrap_or_default()
     }
 
+    pub fn script(&self, name: &str) -> Option<&ScriptCfg> {
+        self.scripts.as_ref().and_then(|m| m.get(name))
+    }
+
+    pub fn script_names(&self) -> Vec<String> {
+        self.scripts
+            .as_ref()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
     }
@@ -405,6 +427,9 @@ out_delay = { a = "tb_top.ref_y", b = "tb_top.q3", shift = 3, from_cycle = 0, to
 
 [queries]
 pipeline = { signals = ["tb_top.ref_y"], context = 3 }
+
+[scripts]
+probe = { file = "scripts/probe.lua" }
 "#,
         )
         .unwrap();
@@ -417,6 +442,7 @@ pipeline = { signals = ["tb_top.ref_y"], context = 3 }
         assert_eq!(cfg.check("out_delay").unwrap().shift, Some(3));
         assert_eq!(cfg.signal_group("inputs").unwrap().len(), 3);
         assert_eq!(cfg.query("pipeline").unwrap().context, Some(3));
+        assert_eq!(cfg.script("probe").unwrap().file, "scripts/probe.lua");
         let types = TypeTable::from_config(&cfg);
         assert_eq!(
             types.lookup("tb_top.sn", "tb_top.sn").unwrap().signed,

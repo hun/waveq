@@ -52,7 +52,7 @@ fn apply_slice(val: &Val, handle: &SigHandle) -> Val {
     }
 }
 
-fn signal_value_json(cell: &Cell, handle: &SigHandle) -> Value {
+pub(crate) fn signal_value_json(cell: &Cell, handle: &SigHandle) -> Value {
     let mut m = Map::new();
     m.insert(
         "value".into(),

@@ -4,6 +4,7 @@ pub mod cmp;
 pub mod cut;
 pub mod introspect;
 pub mod read;
+pub mod script;
 
 use anyhow::{Result, bail};
 use std::path::PathBuf;
@@ -461,6 +462,8 @@ pub fn dispatch(cli: Cli) -> Result<Doc> {
                 },
             },
         )?,
+        Command::Run { script, opts } => crate::cmd::script::run(&app, script, opts)?,
+        Command::Eval { code, opts } => crate::cmd::script::eval(&app, code, opts)?,
     };
     print(&doc, app.format);
     Ok(doc)

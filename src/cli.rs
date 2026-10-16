@@ -115,6 +115,52 @@ pub struct Global {
     pub quiet: bool,
 }
 
+/// Options shared by `run` and `eval`.
+#[derive(Args, Debug, Clone, Default)]
+pub struct ScriptArgs {
+    /// Instruction budget (0 = unlimited)
+    #[arg(long, value_name = "N", default_value_t = 50_000_000)]
+    pub budget: u64,
+
+    /// Lua memory limit in MiB (0 = unlimited)
+    #[arg(long, value_name = "MIB", default_value_t = 256)]
+    pub memory: u64,
+}
+
+/// Long help for `run`/`eval`: the frozen script API.
+const SCRIPT_API_HELP: &str = "\
+Runs a Lua 5.4 script against the loaded dump (side A, plus side B when the
+--b-* options are used). The script gets one global, `wave`:
+
+  wave.sides()                     -- {'a'} or {'a','b'}
+  wave.path([side])                -- dump path of that side
+  wave.info()                      -- file, format, version, date, timescale,
+                                      scopes, vars, tick_count, first_tick,
+                                      first_time, last_tick, last_time
+  wave.clock([side])               -- clock table (clock --format json fields)
+  wave.cycles([side])              -- number of clock edges
+  wave.last_cycle([side])          -- highest logical cycle
+  wave.tick(cycle, [side])         -- tick of a logical cycle (nil out of range)
+  wave.time(tick)                  -- tick as time text (135ns)
+
+  wave.signals([pattern], [side])  -- signal records (pattern is a glob)
+  wave.signal(name, [side])        -- handle; NAME or NAME[msb:lsb]
+    fields: name spec width signed radix kind direction index
+    methods: :at(c) :at_tick(t) :bits(c) :value(c [,radix]) :int(c)
+             :is_xz(c) :changes([from_cycle, [to_cycle]])
+
+  wave.emit(record)                -- one output row
+  wave.columns{...}                -- column order, before the first emit
+  wave.trailer(key, value)         -- extra field after the table
+  wave.note(msg)                   -- stderr note (suppressed by --quiet)
+  wave.encode_json(v)  wave.decode_json(s)  wave.read_json(path)
+
+Cycle arguments are logical cycles (cycle 0 = the side's first edge, unless
+--cycle-offset/--anchor moved it). The exit code is 0 when the script returns
+nil or true, 1 when it returns false, and 2 for a script error or an exceeded
+--budget/--memory limit. `print` writes to stdout for --format text and to
+stderr otherwise, so json/jsonl output stays parseable.";
+
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// File format, version, timescale, scope/signal counts
@@ -406,5 +452,25 @@ pub enum Command {
         /// Drop rows whose values did not change exactly at an edge
         #[arg(long)]
         at_edges_only: bool,
+    },
+
+    /// Run a Lua script (FILE, or @NAME from [scripts]) against the dump
+    #[command(long_about = SCRIPT_API_HELP)]
+    Run {
+        /// Script file, or @NAME for a [scripts] entry
+        #[arg(value_name = "FILE|@NAME")]
+        script: String,
+        #[command(flatten)]
+        opts: ScriptArgs,
+    },
+
+    /// Evaluate a Lua script given on the command line
+    #[command(long_about = SCRIPT_API_HELP)]
+    Eval {
+        /// Lua source
+        #[arg(value_name = "CODE")]
+        code: String,
+        #[command(flatten)]
+        opts: ScriptArgs,
     },
 }

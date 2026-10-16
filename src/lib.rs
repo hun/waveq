@@ -14,6 +14,7 @@ pub mod load;
 pub mod output;
 pub mod resolve;
 pub mod sample;
+pub mod script;
 pub mod sides;
 pub mod vcd;
 

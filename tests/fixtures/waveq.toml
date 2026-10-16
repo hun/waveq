@@ -13,3 +13,6 @@ out_delay = { a = "tb_top.ref_y", b = "tb_top.q3", shift = 3, from_cycle = 0, to
 
 [queries]
 pipeline = { signals = ["tb_top.ref_y", "tb_top.q1", "tb_top.q2", "tb_top.q3"], context = 3 }
+
+[scripts]
+cycles = { file = "tests/fixtures/scripts/cycles.lua" }
