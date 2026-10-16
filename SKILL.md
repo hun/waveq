@@ -1,4 +1,13 @@
+---
+name: waveq
+description: Query VCD/FST/GHW waveform dumps from the CLI instead of writing an ad-hoc parser. Use to find signals and the clock, sample values by cycle, list value changes, tabulate cycles, and locate the first divergent cycle or transfer between a golden model and a pipelined DUT (align/compare).
+---
+
 # waveq — waveform queries for RTL debugging agents
+
+The tool is `waveq` (installed in `~/.local/bin`, source and fixtures in
+`~/Projects/waveform-query`). Run `waveq --help` or `waveq <command> --help` for
+the full option list.
 
 `waveq` answers questions about VCD/FST/GHW dumps from the command line so you
 never have to write an ad-hoc parser. Parsing is done by
