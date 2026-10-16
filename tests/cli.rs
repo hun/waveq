@@ -2283,6 +2283,77 @@ fn signals_tree_view() {
 }
 
 #[test]
+fn cut_rejects_the_rebasing_flags() {
+    // the window is expressed in the file's own cycles; re-basing flags would be
+    // silently meaningless here
+    let out = vcd(&[
+        "cut",
+        "--cycles",
+        "11..12",
+        "--cycle-offset",
+        "5",
+        "--signal",
+        "tb_top.q3",
+    ]);
+    out.expect_code(2).expect_stderr("not supported here");
+    let out = vcd(&[
+        "cut",
+        "--cycles",
+        "11..12",
+        "--anchor",
+        "tb_top.in_valid",
+        "--signal",
+        "tb_top.q3",
+    ]);
+    out.expect_code(2).expect_stderr("not supported here");
+
+    // ... and the cut is read back with the source's numbering via --cycle-offset
+    let path = std::env::temp_dir().join(format!("waveq_window_{}.vcd", std::process::id()));
+    let out = vcd(&[
+        "cut",
+        "--cycles",
+        "11..12",
+        "--signal",
+        "tb_top.q3",
+        "-o",
+        path.to_str().unwrap(),
+    ]);
+    out.expect_code(0);
+    assert!(out.stdout.contains("read_with"), "{}", out.stdout);
+    assert!(out.stderr.contains("--cycle-offset -11"), "{}", out.stderr);
+    // a two-cycle window has fewer edges than clock auto-detection needs, so the
+    // clock is named explicitly (a real window is long enough not to care)
+    let out = run(&[
+        "-f",
+        path.to_str().unwrap(),
+        "--no-config",
+        "--clock",
+        "tb_top.clk",
+        "--cycle-offset",
+        "-11",
+        "table",
+        "--cycles",
+        "11..12",
+        "--signal",
+        "tb_top.q3",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(0);
+    let rows = table_rows(&out.json());
+    assert_eq!(rows[0]["cycle"], 11);
+    assert_eq!(
+        rows[0]["values"]["tb_top.q3"]["bits"], "000101000",
+        "source cycle 11"
+    );
+    assert_eq!(
+        rows[1]["values"]["tb_top.q3"]["bits"], "000101101",
+        "source cycle 12"
+    );
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
 fn cycle_offset_shifts_numbering_like_an_anchor() {
     // --cycle-offset 20 skips the first 20 local cycles, exactly like anchoring
     // on the first cycle where tb_top.stall is 1
