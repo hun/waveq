@@ -2343,12 +2343,12 @@ fn cut_rejects_the_rebasing_flags() {
     let rows = table_rows(&out.json());
     assert_eq!(rows[0]["cycle"], 11);
     assert_eq!(
-        rows[0]["values"]["tb_top.q3"]["bits"], "000101000",
-        "source cycle 11"
+        rows[0]["values"]["tb_top.q3"]["bits"], "000100100",
+        "source cycle 11: q3 = ref_y[8] = 36"
     );
     assert_eq!(
-        rows[1]["values"]["tb_top.q3"]["bits"], "000101101",
-        "source cycle 12"
+        rows[1]["values"]["tb_top.q3"]["bits"], "000101000",
+        "source cycle 12: q3 = ref_y[9] = 40"
     );
     std::fs::remove_file(&path).ok();
 }
