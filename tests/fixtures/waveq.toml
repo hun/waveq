@@ -1,0 +1,15 @@
+[wave]
+file  = "tests/fixtures/data/pipeline.vcd"
+clock = "tb_top.clk"
+
+[types]
+"tb_top.sn" = { signed = true, radix = "dec" }
+
+[signals]
+inputs = ["tb_top.a", "tb_top.b", "tb_top.in_valid"]
+
+[checks]
+out_delay = { a = "tb_top.ref_y", b = "tb_top.q3", shift = 3, from_cycle = 0, to_cycle = 19 }
+
+[queries]
+pipeline = { signals = ["tb_top.ref_y", "tb_top.q1", "tb_top.q2", "tb_top.q3"], context = 3 }
