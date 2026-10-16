@@ -8,11 +8,14 @@ pub mod cli;
 pub mod clock;
 pub mod cmd;
 pub mod config;
+pub mod expect;
 pub mod format;
 pub mod load;
 pub mod output;
 pub mod resolve;
 pub mod sample;
+pub mod sides;
+pub mod vcd;
 
 use std::process::ExitCode;
 

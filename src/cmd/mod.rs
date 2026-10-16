@@ -1,6 +1,7 @@
 //! Command dispatch and shared command context.
 
 pub mod cmp;
+pub mod cut;
 pub mod introspect;
 pub mod read;
 
@@ -21,10 +22,22 @@ pub struct App {
     pub cfg: Config,
     pub cfg_path: Option<PathBuf>,
     pub file: Option<PathBuf>,
+    /// Second dump for side B (default: side B lives in `file`).
+    pub b_file: Option<PathBuf>,
+    /// Default expected-value file for `@` B sides.
+    pub expect_file: Option<PathBuf>,
     pub types: TypeTable,
     pub format: Format,
     pub edge: Edge,
     pub clock_spec: Option<String>,
+    pub b_clock_spec: Option<String>,
+    /// Skip the first N cycles of side B.
+    pub b_cycle_offset: i64,
+    /// Skip the first N cycles of side A.
+    pub cycle_offset: i64,
+    /// Logical cycle 0 of side A/B = first cycle where this signal is 1.
+    pub anchor: Option<String>,
+    pub b_anchor: Option<String>,
     pub radix: Option<Radix>,
     pub quiet: bool,
 }
@@ -54,11 +67,35 @@ impl App {
             eprintln!("using config {}", path.display());
         }
         let file = load::resolve_path_opt(g.file.as_ref(), cfg.wave_file());
+        let b_file = g
+            .b_file
+            .clone()
+            .or_else(|| cfg.wave_b_file().map(PathBuf::from));
+        let expect_file = g.expect_file.clone().or_else(|| {
+            cfg.compare
+                .as_ref()
+                .and_then(|c| c.expect_file.clone())
+                .map(PathBuf::from)
+        });
         let edge = g.edge.or(cfg.wave_edge()).unwrap_or(Edge::Posedge);
         let clock_spec = g
             .clock
             .clone()
             .or_else(|| cfg.wave_clock().map(|s| s.to_string()));
+        let b_clock_spec = g
+            .b_clock
+            .clone()
+            .or_else(|| cfg.wave_b_clock().map(|s| s.to_string()));
+        let b_cycle_offset = g.b_cycle_offset.or(cfg.wave_b_cycle_offset()).unwrap_or(0);
+        let cycle_offset = g.cycle_offset.or(cfg.wave_cycle_offset()).unwrap_or(0);
+        let anchor = g
+            .anchor
+            .clone()
+            .or_else(|| cfg.wave_anchor().map(|s| s.to_string()));
+        let b_anchor = g
+            .b_anchor
+            .clone()
+            .or_else(|| cfg.wave_b_anchor().map(|s| s.to_string()));
         let types = TypeTable::from_config(&cfg);
         types.validate()?;
         Ok(App {
@@ -67,6 +104,13 @@ impl App {
             radix: g.radix,
             edge,
             clock_spec,
+            b_clock_spec,
+            b_cycle_offset,
+            cycle_offset,
+            anchor,
+            b_anchor,
+            b_file,
+            expect_file,
             file,
             cfg,
             cfg_path,
@@ -158,6 +202,53 @@ impl App {
     }
 }
 
+/// `--b-file`/`--b-clock`/`--b-anchor`/`--b-cycle-offset` only mean something for
+/// `align`/`compare`, which read two sides.
+pub fn guard_single_dump(app: &App) -> Result<()> {
+    let g = app.global();
+    if g.b_file.is_some()
+        || g.b_clock.is_some()
+        || g.b_anchor.is_some()
+        || g.b_cycle_offset.unwrap_or(0) != 0
+        || g.expect_file.is_some()
+    {
+        bail!(
+            "--b-file/--b-clock/--b-anchor/--b-cycle-offset need two sides: they apply to \
+             `align` and `compare` only"
+        );
+    }
+    Ok(())
+}
+
+/// Resolve `--anchor` for the single-dump commands: the local edge index that
+/// becomes logical cycle 0.
+pub fn resolve_anchor(
+    app: &App,
+    wf: &mut wellen::simple::Waveform,
+    clock: &crate::clock::ClockInfo,
+) -> Result<i64> {
+    guard_single_dump(app)?;
+    let spec = match app.anchor.as_ref() {
+        // --cycle-offset alone still shifts cycle numbering
+        None => return Ok(app.cycle_offset),
+        Some(spec) => spec,
+    };
+    let anchor = {
+        let sign = app.sign_args(wf.hierarchy())?;
+        let ctx = app.ctx(&sign);
+        crate::resolve::resolve_sig(wf.hierarchy(), &ctx, spec)
+            .map_err(|e| anyhow::anyhow!("--anchor: {e}"))?
+    };
+    anchor.load(wf);
+    crate::sides::resolve_origin(
+        crate::sides::Side::A,
+        wf,
+        clock,
+        Some(&anchor),
+        app.cycle_offset,
+    )
+}
+
 pub fn ts_of(h: &Hierarchy) -> Option<Timescale> {
     h.timescale()
 }
@@ -204,7 +295,8 @@ pub fn dispatch(cli: Cli) -> Result<Doc> {
             match_,
             scope,
             count,
-        } => introspect::signals(&app, match_, scope.as_deref(), *count)?,
+            tree,
+        } => introspect::signals(&app, match_, scope.as_deref(), *count, *tree)?,
         Command::Signal { name, bits } => introspect::signal(&app, name, bits.as_deref())?,
         Command::Clock { list } => introspect::clock(&app, *list)?,
         Command::Config => introspect::config(&app)?,
@@ -228,6 +320,24 @@ pub fn dispatch(cli: Cli) -> Result<Doc> {
             *delta,
             *no_initial,
             *at_edges_only,
+        )?,
+        Command::Cut {
+            cycles,
+            from_cycle,
+            to_cycle,
+            signal,
+            output,
+            all,
+        } => cut::cut(
+            &app,
+            cut::CutArgs {
+                cycles: cycles.clone(),
+                from_cycle: *from_cycle,
+                to_cycle: *to_cycle,
+                signal: signal.clone(),
+                output: output.clone(),
+                all: *all,
+            },
         )?,
         Command::Table {
             signal,
@@ -255,6 +365,7 @@ pub fn dispatch(cli: Cli) -> Result<Doc> {
             align,
             shifts,
             max_shift,
+            max_delta,
             from_cycle,
             to_cycle,
             from,
@@ -277,6 +388,7 @@ pub fn dispatch(cli: Cli) -> Result<Doc> {
                     cmp: *cmp,
                     x: *x,
                     max_shift: *max_shift,
+                    max_delta: *max_delta,
                     gate: gate.clone(),
                     in_valid: in_valid.clone(),
                     in_ready: in_ready.clone(),
@@ -293,6 +405,12 @@ pub fn dispatch(cli: Cli) -> Result<Doc> {
             map,
             check,
             shift,
+            pair_scopes,
+            pair_by,
+            map_glob,
+            delta,
+            max_delta,
+            probe_at,
             auto_shift,
             align,
             gate,
@@ -317,6 +435,11 @@ pub fn dispatch(cli: Cli) -> Result<Doc> {
                 check: check.clone(),
                 shift: *shift,
                 auto_shift: *auto_shift,
+                pair_scopes: pair_scopes.clone(),
+                pair_by: pair_by.clone(),
+                map_glob: map_glob.clone(),
+                delta: *delta,
+                probe_at: Some(*probe_at),
                 probe: probe.clone(),
                 first_only: *first_only,
                 at_edges_only: *at_edges_only,
@@ -325,6 +448,7 @@ pub fn dispatch(cli: Cli) -> Result<Doc> {
                     cmp: *cmp,
                     x: *x,
                     max_shift: *max_shift,
+                    max_delta: *max_delta,
                     gate: gate.clone(),
                     in_valid: in_valid.clone(),
                     in_ready: in_ready.clone(),

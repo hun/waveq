@@ -1340,3 +1340,1019 @@ fn table_clock_none_and_changes_delta() {
     assert_eq!(rows[1]["delta_cycles"], 1);
     assert_eq!(rows[1]["cycle"], 4);
 }
+
+// ---------------------------------------------------------------------------
+// Wave 1: cross-file comparison (--b-file), cycle offsets and anchors
+// ---------------------------------------------------------------------------
+
+const TWO: &str = "tests/fixtures/data/two_scopes.vcd";
+
+#[test]
+fn cross_file_compares_two_dumps() {
+    // side A from the VCD, side B from the FST of the same simulation
+    let out = run(&[
+        "-f",
+        VCD,
+        "--b-file",
+        FST,
+        "--no-config",
+        "compare",
+        "--map",
+        "tb_top.ref_y=tb_top.q3:3",
+        "--from-cycle",
+        "0",
+        "--to-cycle",
+        "19",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(1);
+    let doc = out.json();
+    assert_eq!(doc["file"], VCD);
+    assert_eq!(doc["b_file"], FST, "the header must name both dumps");
+    assert_eq!(doc["pairs"][0]["mismatches"], 1);
+    assert_eq!(doc["pairs"][0]["first_divergent_cycle"], 13);
+    assert_eq!(table_rows(&doc)[0]["b"]["bits"], "000101101");
+
+    // a self-pair across two formats is bit-exact
+    let out = run(&[
+        "-f",
+        VCD,
+        "--b-file",
+        FST,
+        "--no-config",
+        "compare",
+        "--map",
+        "tb_top.q3=tb_top.q3",
+        "--shift",
+        "0",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(0);
+    let doc = out.json();
+    assert_eq!(doc["pairs"][0]["compared"], 46);
+    assert_eq!(doc["pairs"][0]["mismatches"], 0);
+
+    // align also works across files
+    let out = run(&[
+        "-f",
+        VCD,
+        "--b-file",
+        FST,
+        "--no-config",
+        "align",
+        "--a",
+        "tb_top.ref_y",
+        "--b",
+        "tb_top.q3",
+        "--shifts",
+        "0..=4",
+        "--from-cycle",
+        "0",
+        "--to-cycle",
+        "19",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(1);
+    assert_eq!(out.json()["best_shift"], 3);
+
+    // a GHW dump works as side B too (all three formats are first-class sides)
+    let out = run(&[
+        "-f",
+        GHW,
+        "--b-file",
+        GHW,
+        "--no-config",
+        "compare",
+        "--map",
+        "counter_tb.cnt=counter_tb.cnt",
+        "--shift",
+        "0",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(0);
+    let doc = out.json();
+    assert_eq!(doc["pairs"][0]["compared"], 20);
+    assert_eq!(doc["pairs"][0]["mismatches"], 0);
+    assert_eq!(doc["b_file"], GHW);
+    assert_eq!(doc["b_clock"], "counter_tb.clk");
+
+    // B-side flags on a single-dump command are an error, not a silent no-op
+    let out = run(&[
+        "-f",
+        VCD,
+        "--b-file",
+        FST,
+        "--no-config",
+        "table",
+        "--signal",
+        "tb_top.a",
+    ]);
+    out.expect_code(2).expect_stderr("need two sides");
+    let out = run(&[
+        "-f",
+        VCD,
+        "--b-cycle-offset",
+        "3",
+        "--no-config",
+        "changes",
+        "--signal",
+        "tb_top.a",
+    ]);
+    out.expect_code(2).expect_stderr("need two sides");
+}
+
+#[test]
+fn b_cycle_offset_absorbs_a_known_skew() {
+    // B's local edge 3 becomes logical cycle 0, so shift 0 is the aligned view
+    let out = run(&[
+        "-f",
+        VCD,
+        "--b-file",
+        VCD,
+        "--b-cycle-offset",
+        "3",
+        "--no-config",
+        "compare",
+        "--map",
+        "tb_top.ref_y=tb_top.q3",
+        "--shift",
+        "0",
+        "--from-cycle",
+        "0",
+        "--to-cycle",
+        "19",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(1);
+    let doc = out.json();
+    assert_eq!(doc["b_cycle_origin"], 3);
+    assert_eq!(doc["pairs"][0]["first_divergent_cycle"], 10);
+    let row = &table_rows(&doc)[0];
+    assert_eq!(
+        row["a_cycle"], row["b_cycle"],
+        "the offset absorbs the latency"
+    );
+    assert_eq!(row["b_cycle_local"], 13, "local B cycle = logical + origin");
+    assert_eq!(row["time"], "135ns", "times stay absolute");
+}
+
+#[test]
+fn anchor_redefines_cycle_zero_everywhere() {
+    // --anchor moves cycle 0 to the first cycle where the signal is 1
+    let out = vcd(&[
+        "--anchor",
+        "tb_top.stall",
+        "table",
+        "--cycles",
+        "0..2",
+        "--signal",
+        "tb_top.a",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(0);
+    let doc = out.json();
+    let rows = table_rows(&doc);
+    assert_eq!(rows[0]["cycle"], 0);
+    assert_eq!(
+        rows[0]["tick"], 205000,
+        "cycle 0 is the stall edge (local 20)"
+    );
+    assert_eq!(
+        rows[0]["values"]["tb_top.a"]["value"], "14",
+        "hex of a_20 = 20"
+    );
+
+    // compare reports the origin and works inside the new frame
+    let out = vcd(&[
+        "--anchor",
+        "tb_top.stall",
+        "compare",
+        "--map",
+        "tb_top.ref_y=tb_top.q3:3",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(1);
+    let doc = out.json();
+    assert_eq!(doc["a_cycle_origin"], 20);
+    assert_eq!(doc["to_cycle"], 25, "45 - 20");
+    let first = doc["pairs"][0]["first_divergent_cycle"].as_i64().unwrap();
+    assert!(
+        (0..5).contains(&first),
+        "the pre-stall bug is now before cycle 0: {first}"
+    );
+    assert_eq!(doc["pairs"][0]["compared"], 23);
+
+    // changes work in the anchored frame too (nothing changes while stalled)
+    let out = vcd(&[
+        "--anchor",
+        "tb_top.stall",
+        "changes",
+        "--signal",
+        "tb_top.a",
+        "--from-cycle",
+        "0",
+        "--to-cycle",
+        "2",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(0);
+    assert_eq!(table_rows(&out.json()).len(), 0);
+
+    // a signal that is already 1 at the first edge keeps the default origin
+    let out = vcd(&[
+        "--anchor",
+        "tb_top.in_valid",
+        "table",
+        "--cycles",
+        "0..0",
+        "--signal",
+        "tb_top.a",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(0);
+    let doc = out.json();
+    assert!(doc.get("a_cycle_origin").is_none() || doc["a_cycle_origin"] == 0);
+    assert_eq!(table_rows(&doc)[0]["values"]["tb_top.a"]["value"], "01");
+
+    // `rst` is only high before the first edge, so it can never be an anchor
+    let out = vcd(&["--anchor", "tb_top.rst", "table", "--signal", "tb_top.a"]);
+    out.expect_code(2).expect_stderr("never asserted");
+
+    // both sides anchored explicitly on one shared dump stay in step
+    let out = run(&[
+        "-f",
+        VCD,
+        "--anchor",
+        "tb_top.stall",
+        "--b-anchor",
+        "tb_top.stall",
+        "--no-config",
+        "compare",
+        "--map",
+        "tb_top.ref_y=tb_top.q3:3",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(1);
+    let doc = out.json();
+    assert_eq!(doc["a_cycle_origin"], 20);
+    assert_eq!(doc["b_cycle_origin"], 20);
+    assert_eq!(doc["pairs"][0]["compared"], 23);
+
+    // errors: unknown signal, and a signal that is never 1
+    let out = vcd(&["--anchor", "tb_top.qqq", "table", "--signal", "tb_top.a"]);
+    out.expect_code(2).expect_stderr("no signal \"tb_top.qqq\"");
+    let out = vcd(&["--anchor", "tb_top.sn", "table", "--signal", "tb_top.a"]);
+    out.expect_code(2).expect_stderr("never asserted");
+}
+
+// ---------------------------------------------------------------------------
+// Wave 2: pairing a whole scope without writing every --map
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pair_scopes_and_map_glob_pair_by_name() {
+    let expected_pairs = vec![
+        "tb.dut.a0",
+        "tb.dut.b0",
+        "tb.dut.lane0.x",
+        "tb.dut.lane1.x",
+        "tb.dut.sum",
+    ];
+
+    let out = run(&[
+        "-f",
+        TWO,
+        "--no-config",
+        "compare",
+        "--pair-scopes",
+        "tb.dut,tb.ref",
+        "--pair-by",
+        "path",
+        "--shift",
+        "0",
+        "--delta",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(1);
+    let doc = out.json();
+    assert_eq!(doc["pair_count"], 5);
+    assert_eq!(doc["mismatches"], 2);
+    let names: Vec<&str> = doc["pairs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["a"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, expected_pairs, "sorted by pairing key");
+
+    // a signal that exists on one side only is reported, not silently ignored
+    assert_eq!(doc["unpaired_a_signals"], 1);
+    assert_eq!(doc["unpaired_a"][0], "tb.dut.only");
+    assert_eq!(doc["unpaired_b_signals"], 1);
+    assert_eq!(doc["unpaired_b"][0], "tb.ref.extra");
+    assert!(out.stderr.contains("nothing to compare"), "{}", out.stderr);
+
+    // the same pairing via --map-glob
+    let out = run(&[
+        "-f",
+        TWO,
+        "--no-config",
+        "compare",
+        "--map-glob",
+        "tb.dut.*=tb.ref.*",
+        "--pair-by",
+        "path",
+        "--shift",
+        "0",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(1);
+    let doc = out.json();
+    assert_eq!(doc["pair_count"], 5);
+    assert_eq!(doc["mismatches"], 2);
+    let cycles: Vec<i64> = table_rows(&doc)
+        .iter()
+        .map(|r| r["cycle"].as_i64().unwrap())
+        .collect();
+    assert_eq!(cycles, vec![5, 6]);
+
+    // leaf pairing on this fixture is ambiguous and says how to fix it
+    let out = run(&[
+        "-f",
+        TWO,
+        "--no-config",
+        "compare",
+        "--pair-scopes",
+        "tb.dut,tb.ref",
+        "--shift",
+        "0",
+    ]);
+    out.expect_code(2)
+        .expect_stderr("ambiguous")
+        .expect_stderr("--pair-by path");
+
+    // a glob in --map is a mistake worth naming
+    let out = run(&[
+        "-f",
+        TWO,
+        "--no-config",
+        "compare",
+        "--map",
+        "tb.dut.*=tb.ref.*",
+        "--shift",
+        "0",
+    ]);
+    out.expect_code(2).expect_stderr("looks like a glob");
+}
+
+#[test]
+fn config_compare_pairs_section() {
+    let path = std::env::temp_dir().join(format!("waveq_pairs_{}.toml", std::process::id()));
+    let two_abs = std::fs::canonicalize(TWO).unwrap();
+    std::fs::write(
+        &path,
+        format!(
+            "[wave]\nfile = \"{}\"\n\n[compare]\nshift = 0\n\n[compare.pairs]\n\"tb.dut.*\" = \"tb.ref.*\"\n",
+            two_abs.display()
+        ),
+    )
+    .unwrap();
+    // `shift` is not a [compare] key: it must be rejected loudly (no silent typos)
+    let out = run(&["--config", path.to_str().unwrap(), "info"]);
+    out.expect_code(2).expect_stderr("unknown config key");
+
+    std::fs::write(
+        &path,
+        format!(
+            "[wave]\nfile = \"{}\"\n\n[compare]\nmax_delta = 1\n\n[compare.pairs]\n\"tb.dut.*\" = \"tb.ref.*\"\n",
+            two_abs.display()
+        ),
+    )
+    .unwrap();
+    let out = run(&[
+        "--config",
+        path.to_str().unwrap(),
+        "compare",
+        "--pair-by",
+        "path",
+        "--shift",
+        "0",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(1);
+    let doc = out.json();
+    assert_eq!(doc["pair_count"], 5);
+    assert_eq!(doc["max_delta"], 1, "[compare] max_delta applies");
+    // the +1 sum flip is inside the bound, the -9 lane1 divergence is not
+    assert_eq!(doc["mismatches"], 1);
+    let divergent: Vec<&str> = doc["pairs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|p| p["status"] == "divergent")
+        .map(|p| p["a"].as_str().unwrap())
+        .collect();
+    assert_eq!(divergent, vec!["tb.dut.lane1.x"]);
+    std::fs::remove_file(&path).ok();
+}
+
+// ---------------------------------------------------------------------------
+// Wave 3: numeric delta columns, masks and a documented bound
+// ---------------------------------------------------------------------------
+
+#[test]
+fn delta_columns_and_summary() {
+    let out = run(&[
+        "-f",
+        TWO,
+        "--no-config",
+        "compare",
+        "--pair-scopes",
+        "tb.dut,tb.ref",
+        "--pair-by",
+        "path",
+        "--shift",
+        "0",
+        "--delta",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(1);
+    let doc = out.json();
+    let rows = table_rows(&doc);
+    assert_eq!(rows.len(), 2);
+    let sum_row = rows.iter().find(|r| r["pair"] == 4).unwrap();
+    assert_eq!(sum_row["cycle"], 5);
+    assert_eq!(sum_row["delta"], -1);
+    assert_eq!(sum_row["bits_differ"], "01f");
+    assert_eq!(sum_row["diff_bits"], 5);
+    let lane_row = rows.iter().find(|r| r["pair"] == 3).unwrap();
+    assert_eq!(lane_row["delta"], -9);
+    assert_eq!(lane_row["bits_differ"], "9");
+    assert_eq!(lane_row["diff_bits"], 2);
+
+    let pairs = doc["pairs"].as_array().unwrap();
+    let sum_pair = pairs.iter().find(|p| p["a"] == "tb.dut.sum").unwrap();
+    assert_eq!(sum_pair["max_abs_delta"], 1);
+    assert_eq!(sum_pair["max_bits_differ"], 5);
+    assert_eq!(sum_pair["cmp"], "bit-exact");
+    // the mask is not in the text table unless --delta is given
+    let out = run(&[
+        "-f",
+        TWO,
+        "--no-config",
+        "compare",
+        "--pair-scopes",
+        "tb.dut,tb.ref",
+        "--pair-by",
+        "path",
+        "--shift",
+        "0",
+    ]);
+    let main_header = out
+        .stdout
+        .lines()
+        .find(|l| l.starts_with("cycle") || l.starts_with("transfer"))
+        .expect("main table header");
+    assert!(
+        !main_header.contains("bits_differ") && !main_header.contains("delta"),
+        "delta columns are opt-in: {main_header}"
+    );
+
+    // signed sides change the delta sign (dut.lane1.x = 9 -> -7 as a 4-bit signed value)
+    let out = run(&[
+        "-f",
+        TWO,
+        "--no-config",
+        "--signed",
+        "compare",
+        "--pair-scopes",
+        "tb.dut,tb.ref",
+        "--pair-by",
+        "path",
+        "--shift",
+        "0",
+        "--delta",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(1);
+    let doc = out.json();
+    let lane = table_rows(&doc)
+        .into_iter()
+        .find(|r| r["pair"] == 3)
+        .unwrap();
+    assert_eq!(lane["delta"], 7, "0 - (-7) with both sides signed");
+}
+
+#[test]
+fn max_delta_turns_a_metric_into_the_rule() {
+    // bit-exact by default: the injected +1 is a divergence
+    let out = run(&[
+        "-f",
+        VCD,
+        "--no-config",
+        "compare",
+        "--map",
+        "tb_top.ref_y=tb_top.q3:3",
+        "--from-cycle",
+        "0",
+        "--to-cycle",
+        "19",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(1);
+    assert_eq!(out.json()["pairs"][0]["mismatches"], 1);
+
+    // tolerance 1: no divergence, exit 0, rule reported
+    let out = run(&[
+        "-f",
+        VCD,
+        "--no-config",
+        "compare",
+        "--map",
+        "tb_top.ref_y=tb_top.q3:3",
+        "--max-delta",
+        "1",
+        "--from-cycle",
+        "0",
+        "--to-cycle",
+        "19",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(0);
+    let doc = out.json();
+    assert_eq!(doc["max_delta"], 1);
+    assert_eq!(doc["divergence_rule"], "|delta| > 1");
+    assert_eq!(doc["pairs"][0]["mismatches"], 0);
+    assert_eq!(doc["pairs"][0]["max_abs_delta"], 1);
+
+    // tolerance 0 is exact equality again
+    let out = run(&[
+        "-f",
+        VCD,
+        "--no-config",
+        "compare",
+        "--map",
+        "tb_top.ref_y=tb_top.q3:3",
+        "--max-delta",
+        "0",
+        "--from-cycle",
+        "0",
+        "--to-cycle",
+        "19",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(1);
+    assert_eq!(out.json()["pairs"][0]["mismatches"], 1);
+
+    // align uses the same rule, so a shift scan can be done against a bound
+    let out = run(&[
+        "-f",
+        VCD,
+        "--no-config",
+        "align",
+        "--a",
+        "tb_top.ref_y",
+        "--b",
+        "tb_top.q3",
+        "--shifts",
+        "0..=8",
+        "--max-delta",
+        "1",
+        "--from-cycle",
+        "0",
+        "--to-cycle",
+        "19",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(0);
+    let doc = out.json();
+    assert_eq!(doc["best_shift"], 3);
+    assert_eq!(doc["best_mismatches"], 0);
+    assert_eq!(doc["divergence_rule"], "|delta| > 1");
+    assert_eq!(doc["max_abs_delta"], 1);
+}
+
+#[test]
+fn probe_at_chooses_the_sampled_cycle() {
+    let out = vcd(&[
+        "compare",
+        "--map",
+        "tb_top.ref_y=tb_top.q3:3",
+        "--from-cycle",
+        "0",
+        "--to-cycle",
+        "19",
+        "--probe",
+        "tb_top.a",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(1);
+    let doc = out.json();
+    let row = &table_rows(&doc)[0];
+    assert_eq!(row["probe_at"], "a_cycle");
+    assert_eq!(row["probe"]["tb_top.a"]["value"], "0b", "a_10 = 11");
+
+    let out = vcd(&[
+        "compare",
+        "--map",
+        "tb_top.ref_y=tb_top.q3:3",
+        "--from-cycle",
+        "0",
+        "--to-cycle",
+        "19",
+        "--probe",
+        "tb_top.a",
+        "--probe-at",
+        "b-cycle",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(1);
+    let doc = out.json();
+    let row = &table_rows(&doc)[0];
+    assert_eq!(row["probe_at"], "b_cycle");
+    assert_eq!(
+        row["probe"]["tb_top.a"]["value"], "0e",
+        "a_13 = 14 at the divergent DUT cycle"
+    );
+    assert_eq!(row["a_cycle"], 10);
+    assert_eq!(row["b_cycle"], 13);
+}
+
+// ---------------------------------------------------------------------------
+// Wave 4: expected values from a file (no signal on side B at all)
+// ---------------------------------------------------------------------------
+
+fn write_expect_csv(name: &str, body: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("waveq_{}_{}.csv", name, std::process::id()));
+    std::fs::write(&path, body).unwrap();
+    path
+}
+
+#[test]
+fn expect_file_is_a_b_side() {
+    // dut.sum = 3c, but the injected bug makes cycle 5 equal 16
+    let csv = write_expect_csv(
+        "golden",
+        "cycle,dout\n0,0\n1,3\n2,6\n3,9\n4,12\n5,15\n6,18\n7,21\n",
+    );
+    let map = format!("tb.dut.sum=@{}:cycle,dout", csv.display());
+    let out = run(&[
+        "-f",
+        TWO,
+        "--no-config",
+        "compare",
+        "--map",
+        &map,
+        "--shift",
+        "0",
+        "--delta",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(1);
+    let doc = out.json();
+    assert_eq!(doc["pair_count"], 1);
+    assert_eq!(doc["mismatches"], 1);
+    let row = &table_rows(&doc)[0];
+    assert_eq!(row["cycle"], 5);
+    assert_eq!(row["a"]["value"], "010");
+    assert_eq!(row["b"]["value"], "00f");
+    assert_eq!(
+        row["delta"], -1,
+        "the DUT is one higher than the golden value"
+    );
+    assert_eq!(row["pair"], 0);
+
+    // the same through --expect-file with a `@:cols` B side
+    let out = run(&[
+        "-f",
+        TWO,
+        "--expect-file",
+        csv.to_str().unwrap(),
+        "--no-config",
+        "compare",
+        "--map",
+        "tb.dut.sum=@:cycle,dout",
+        "--shift",
+        "0",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(1);
+    assert_eq!(out.json()["mismatches"], 1);
+
+    // the golden file is a *bound* away from failing: --max-delta 1 accepts it
+    let out = run(&[
+        "-f",
+        TWO,
+        "--expect-file",
+        csv.to_str().unwrap(),
+        "--no-config",
+        "compare",
+        "--map",
+        "tb.dut.sum=@:cycle,dout",
+        "--shift",
+        "0",
+        "--max-delta",
+        "1",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(0);
+    let doc = out.json();
+    assert_eq!(doc["mismatches"], 0);
+    assert_eq!(doc["divergence_rule"], "|delta| > 1");
+
+    std::fs::remove_file(&csv).ok();
+}
+
+#[test]
+fn expect_file_edge_cases() {
+    // partial coverage: uncovered cycles are skipped and reported
+    let short = write_expect_csv("short", "cycle,dout\n0,0\n1,3\n");
+    let map = format!("tb.dut.sum=@{}:cycle,dout", short.display());
+    let out = run(&[
+        "-f",
+        TWO,
+        "--no-config",
+        "compare",
+        "--map",
+        &map,
+        "--shift",
+        "0",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(0);
+    let doc = out.json();
+    assert_eq!(doc["pairs"][0]["compared"], 2);
+    assert_eq!(doc["pairs"][0]["skipped"], 6);
+    assert!(out.stderr.contains("not covered"), "{}", out.stderr);
+    std::fs::remove_file(&short).ok();
+
+    // a value that does not fit the compared width is an error, not a silent skip
+    let bad = write_expect_csv("bad", "cycle,dout\n0,999999\n");
+    let map = format!("tb.dut.sum=@{}:cycle,dout", bad.display());
+    let out = run(&[
+        "-f",
+        TWO,
+        "--no-config",
+        "compare",
+        "--map",
+        &map,
+        "--shift",
+        "0",
+    ]);
+    out.expect_code(2).expect_stderr("does not fit in 9 bits");
+    std::fs::remove_file(&bad).ok();
+
+    // duplicate cycles are refused
+    let dup = write_expect_csv("dup", "cycle,dout\n1,0\n1,1\n");
+    let map = format!("tb.dut.sum=@{}:cycle,dout", dup.display());
+    let out = run(&[
+        "-f",
+        TWO,
+        "--no-config",
+        "compare",
+        "--map",
+        &map,
+        "--shift",
+        "0",
+    ]);
+    out.expect_code(2).expect_stderr("already has a value");
+    std::fs::remove_file(&dup).ok();
+
+    // x/z values are honoured (here they make the unit x-involved)
+    let xz = write_expect_csv("xz", "cycle,dout\n0,00xz\n1,3\n");
+    let map = format!("tb.dut.sum=@{}:cycle,dout", xz.display());
+    let out = run(&[
+        "-f",
+        TWO,
+        "--no-config",
+        "compare",
+        "--map",
+        &map,
+        "--shift",
+        "0",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(1);
+    let doc = out.json();
+    assert_eq!(doc["pairs"][0]["x_involved"], 1);
+    assert_eq!(table_rows(&doc)[0]["cmp"], "x-involved");
+    std::fs::remove_file(&xz).ok();
+
+    // JSONL expected values work the same way
+    let jsonl = std::env::temp_dir().join(format!("waveq_golden_{}.jsonl", std::process::id()));
+    std::fs::write(
+        &jsonl,
+        "{\"cycle\":0,\"dout\":0}\n{\"cycle\":1,\"dout\":3}\n{\"cycle\":2,\"dout\":6}\n\
+         {\"cycle\":3,\"dout\":9}\n{\"cycle\":4,\"dout\":12}\n{\"cycle\":5,\"dout\":15}\n\
+         {\"cycle\":6,\"dout\":18}\n{\"cycle\":7,\"dout\":21}\n",
+    )
+    .unwrap();
+    let map = format!("tb.dut.sum=@{}:cycle,dout", jsonl.display());
+    let out = run(&[
+        "-f",
+        TWO,
+        "--no-config",
+        "compare",
+        "--map",
+        &map,
+        "--shift",
+        "0",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(1);
+    assert_eq!(out.json()["mismatches"], 1);
+    std::fs::remove_file(&jsonl).ok();
+
+    // `@` without --expect-file says so
+    let out = run(&[
+        "-f",
+        TWO,
+        "--no-config",
+        "compare",
+        "--map",
+        "tb.dut.sum=@:cycle,dout",
+        "--shift",
+        "0",
+    ]);
+    out.expect_code(2).expect_stderr("--expect-file");
+
+    // a missing file is an error
+    let out = run(&[
+        "-f",
+        TWO,
+        "--no-config",
+        "compare",
+        "--map",
+        "tb.dut.sum=@/nonexistent/g.csv:cycle,dout",
+        "--shift",
+        "0",
+    ]);
+    out.expect_code(2).expect_stderr("cannot read");
+}
+
+#[test]
+fn signals_tree_view() {
+    let out = run(&[
+        "-f",
+        TWO,
+        "--no-config",
+        "signals",
+        "--tree",
+        "--match",
+        "tb.dut.*",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(0);
+    let doc = out.json();
+    let rows = table_rows(&doc);
+    let scopes: Vec<(&str, i64)> = rows
+        .iter()
+        .filter(|r| r["kind"] == "scope")
+        .map(|r| {
+            (
+                r["full_name"].as_str().unwrap(),
+                r["depth"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        scopes,
+        vec![
+            ("tb", 1),
+            ("tb.dut", 2),
+            ("tb.dut.lane0", 3),
+            ("tb.dut.lane1", 3)
+        ]
+    );
+
+    // signals stay under their scope and pick up indentation in the text view
+    let out = run(&[
+        "-f",
+        TWO,
+        "--no-config",
+        "signals",
+        "--tree",
+        "--scope",
+        "tb.dut",
+    ]);
+    out.expect_code(0);
+    assert!(out.stdout.contains("\ntb.dut  scope"), "{}", out.stdout);
+    assert!(out.stdout.contains("\n  a0"), "{}", out.stdout);
+    assert!(out.stdout.contains("\n    x"), "{}", out.stdout);
+    assert!(!out.stdout.contains("tb.ref"), "{}", out.stdout);
+
+    // an unknown scope root is an error
+    let out = run(&[
+        "-f",
+        TWO,
+        "--no-config",
+        "signals",
+        "--tree",
+        "--scope",
+        "tb.nope",
+    ]);
+    out.expect_code(2).expect_stderr("no scope");
+}
+
+#[test]
+fn cycle_offset_shifts_numbering_like_an_anchor() {
+    // --cycle-offset 20 skips the first 20 local cycles, exactly like anchoring
+    // on the first cycle where tb_top.stall is 1
+    let by_offset = vcd(&[
+        "--cycle-offset",
+        "20",
+        "table",
+        "--cycles",
+        "0..2",
+        "--signal",
+        "tb_top.a",
+        "--format",
+        "json",
+    ]);
+    by_offset.expect_code(0);
+    let by_anchor = vcd(&[
+        "--anchor",
+        "tb_top.stall",
+        "table",
+        "--cycles",
+        "0..2",
+        "--signal",
+        "tb_top.a",
+        "--format",
+        "json",
+    ]);
+    by_anchor.expect_code(0);
+    assert_eq!(table_rows(&by_offset.json()), table_rows(&by_anchor.json()));
+    assert_eq!(table_rows(&by_offset.json())[0]["tick"], 205000);
+
+    // a negative offset moves numbering back: cycle 5 is the file's local cycle 0
+    let out = vcd(&[
+        "--cycle-offset",
+        "-5",
+        "table",
+        "--cycles",
+        "5..6",
+        "--signal",
+        "tb_top.a",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(0);
+    let rows = table_rows(&out.json());
+    assert_eq!(rows[0]["cycle"], 5);
+    assert_eq!(rows[0]["tick"], 5000, "local cycle 0 is the first posedge");
+    assert_eq!(rows[0]["values"]["tb_top.a"]["value"], "01");
+
+    // cycles that do not exist in the file are an error, not a crash
+    let out = vcd(&[
+        "--cycle-offset",
+        "-5",
+        "table",
+        "--cycles",
+        "0..0",
+        "--signal",
+        "tb_top.a",
+    ]);
+    out.expect_code(2).expect_stderr("first cycle here is 5");
+
+    // compare honours it too: the origin is reported
+    let out = vcd(&[
+        "--cycle-offset",
+        "20",
+        "compare",
+        "--map",
+        "tb_top.ref_y=tb_top.q3:3",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(1);
+    assert_eq!(out.json()["a_cycle_origin"], 20);
+}

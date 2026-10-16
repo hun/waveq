@@ -319,6 +319,8 @@ pub fn radix_for(
 /// Everything a command needs about one resolved signal.
 #[derive(Debug, Clone)]
 pub struct SigHandle {
+    /// Which comparison side this handle was resolved for.
+    pub side: crate::sides::Side,
     /// The spec as the user wrote it.
     pub spec: String,
     pub var: VarRef,
@@ -343,6 +345,12 @@ impl SigHandle {
             Some((msb, lsb)) => msb - lsb + 1,
             None => self.width,
         }
+    }
+
+    /// Tag this handle as belonging to the other side.
+    pub fn on_side(mut self, side: crate::sides::Side) -> SigHandle {
+        self.side = side;
+        self
     }
 
     pub fn is_bit_vector(&self) -> bool {
@@ -377,6 +385,30 @@ impl SigHandle {
         m.insert("signed".into(), self.signed.into());
         m.insert("radix".into(), self.radix.name().into());
         serde_json::Value::Object(m)
+    }
+}
+
+#[cfg(test)]
+impl SigHandle {
+    /// Minimal handle for unit tests that only exercise value logic.
+    pub fn test_stub(name: &str, width: u32, signed: bool) -> SigHandle {
+        SigHandle {
+            side: crate::sides::Side::A,
+            spec: name.to_string(),
+            var: VarRef::default(),
+            signal_ref: SignalRef::from_index(0).unwrap(),
+            full_name: name.to_string(),
+            name: name.to_string(),
+            width,
+            encoding: SignalEncoding::BitVector(width),
+            var_type: "reg",
+            direction: "unknown",
+            index: None,
+            slice: None,
+            signed,
+            signed_source: SignSource::Inferred,
+            radix: Radix::Auto,
+        }
     }
 }
 
@@ -459,6 +491,7 @@ pub fn resolve_sig(h: &Hierarchy, ctx: &ResolveCtx, spec_str: &str) -> Result<Si
         signedness(h, var, &spec.with_bits(), &full_name, ctx.sign, ctx.types);
     let radix = radix_for(&spec.with_bits(), &full_name, ctx.radix, ctx.types);
     Ok(SigHandle {
+        side: crate::sides::Side::A,
         spec: spec_str.to_string(),
         var,
         signal_ref: v.signal_ref(),

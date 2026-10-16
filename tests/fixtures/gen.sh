@@ -2,8 +2,9 @@
 # Regenerate the tool-generated fixtures in tests/fixtures/data/.
 # Run manually; the outputs are committed so `cargo test` needs no EDA tools.
 #
-# tests/fixtures/data/x_values.vcd is hand-written (x/z coverage) and is NOT
-# touched by this script.
+# tests/fixtures/data/x_values.vcd (x/z coverage) and
+# tests/fixtures/data/two_scopes.vcd (dut./ref. scope pairing, nested lanes,
+# injected +1) are hand-written and are NOT touched by this script.
 set -euo pipefail
 cd "$(dirname "$0")"
 mkdir -p data

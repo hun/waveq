@@ -32,6 +32,23 @@ pub struct WaveCfg {
     pub clock: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub edge: Option<Edge>,
+    /// Second dump holding side B (default: side B is in `file`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub b_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub b_clock: Option<String>,
+    /// Skip the first N cycles of side B
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub b_cycle_offset: Option<i64>,
+    /// Skip the first N cycles of side A
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cycle_offset: Option<i64>,
+    /// First cycle where this signal is 1 becomes logical cycle 0 of side A
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<String>,
+    /// Same, for side B
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub b_anchor: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -55,6 +72,28 @@ pub struct CompareCfg {
     pub out_ready: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gate: Option<String>,
+    /// Side A glob -> side B glob, paired by leaf name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pairs: Option<IndexMap<String, String>>,
+    /// Default expected-value file for `--map A=@:cycle,value` B sides
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expect_file: Option<String>,
+    /// Add delta/bits_differ columns
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta: Option<bool>,
+    /// Treat |b - a| > N as a divergence
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_delta: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_at: Option<ProbeAtCfg>,
+}
+
+/// Where `--probe` samples (config spelling of the CLI enum).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProbeAtCfg {
+    ACycle,
+    BCycle,
 }
 
 /// A named `compare` invocation (`[checks] NAME`).
@@ -98,7 +137,22 @@ pub struct CheckCfg {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub probe: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_at: Option<ProbeAtCfg>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub at_edges_only: Option<bool>,
+    /// Side A glob -> side B glob, paired by leaf name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pairs: Option<IndexMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_delta: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub map_glob: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pair_scopes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pair_by: Option<String>,
 }
 
 /// A named `table` invocation (`[queries] NAME`).
@@ -199,6 +253,30 @@ impl Config {
 
     pub fn wave_clock(&self) -> Option<&str> {
         self.wave.as_ref().and_then(|w| w.clock.as_deref())
+    }
+
+    pub fn wave_b_file(&self) -> Option<&str> {
+        self.wave.as_ref().and_then(|w| w.b_file.as_deref())
+    }
+
+    pub fn wave_b_clock(&self) -> Option<&str> {
+        self.wave.as_ref().and_then(|w| w.b_clock.as_deref())
+    }
+
+    pub fn wave_b_cycle_offset(&self) -> Option<i64> {
+        self.wave.as_ref().and_then(|w| w.b_cycle_offset)
+    }
+
+    pub fn wave_cycle_offset(&self) -> Option<i64> {
+        self.wave.as_ref().and_then(|w| w.cycle_offset)
+    }
+
+    pub fn wave_anchor(&self) -> Option<&str> {
+        self.wave.as_ref().and_then(|w| w.anchor.as_deref())
+    }
+
+    pub fn wave_b_anchor(&self) -> Option<&str> {
+        self.wave.as_ref().and_then(|w| w.b_anchor.as_deref())
     }
 
     pub fn wave_edge(&self) -> Option<Edge> {

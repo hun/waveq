@@ -35,6 +35,7 @@ generated dumps are committed under `tests/fixtures/data/`.
 | `table` | per-cycle table of sampled signals |
 | `align` | shift scan: mismatch count per candidate shift |
 | `compare` | compare pairs, report every divergent cycle or transfer |
+| `cut` | write a cycle window of a dump as a small VCD |
 
 Run `waveq --help` or `waveq <command> --help` for the options.
 
@@ -68,6 +69,30 @@ waveq -f $F compare --align transfers --in-valid tb_top.in_valid --out-valid tb_
 # mismatches 0, unpaired 3, exit 0  (unpaired alone is not a failure)
 ```
 
+## Composition debugging (one dump, two scopes)
+
+For a golden model that is a *composition* of the same blocks as the DUT (one
+dump, `dut.*` and `ref.*`, same leaf names), pair every stage at once and read
+the `first_divergent_cycle` column:
+
+```sh
+waveq -f /tmp/fir.dump.vcd signals --tree --match 'dut.*'   # scope structure
+time waveq -f /tmp/fir.dump.vcd compare --pair-scopes dut,ref --shift 0
+# 41 pairs, sorted by first_divergent_cycle; --delta adds `delta`/`bits_differ`,
+# `--max-delta N` compares against a documented bound instead of exact equality
+```
+
+Other sides for the comparison: a second dump (`--b-file`, with `--b-clock`,
+`--b-anchor`, `--b-cycle-offset` for a different preamble) or a file of golden
+values (`--map dut.dout=@golden.csv:cycle,dout`).
+
+## Cutting a failing dump down
+
+```sh
+waveq -f big.vcd cut --cycles 2040..2100 --signal 'dut.*,ref.*,tb.ce,tb.rst' -o small.vcd
+# 1.97 MB -> 52 KB, same values, same cycle numbers (the clock is kept on purpose)
+```
+
 ## Configuration
 
 `.waveq.toml` (discovered from the working directory upward, or `--config PATH`)
@@ -81,6 +106,19 @@ for the schema and the precedence rule (CLI flag → named entry → section def
 * `0` — success, no divergence
 * `1` — `compare`/`align` found a divergence
 * `2` — usage, IO, parse, config or clock error (message on stderr)
+
+## Big dumps
+
+VCD is what most tools emit, but FST reads several times faster and is far
+smaller, and waveq treats them identically:
+
+```sh
+vcd2fst dump.vcd dump.fst     # installed at ~/.local/bin/vcd2fst
+waveq -f dump.fst compare --pair-scopes dut,ref --shift 0
+```
+
+A 2 MB / 4036-cycle dump shrinks to 55 kB; `waveq info --full` then reads the
+body in ~0.01 s instead of 0.05 s.
 
 ## Fixtures
 
@@ -97,5 +135,8 @@ src/clock.rs     clock detection, edge extraction, cycle map
 src/load.rs      wellen loading + user-facing error mapping
 src/config.rs    TOML config: discovery, parsing, precedence helpers
 src/output.rs    text/json/jsonl document model
-src/cmd/         info, scopes, signals, signal, clock, config, value, changes, table, align, compare
+src/sides.rs     side A/B views: per-side clock, anchor and cycle offset
+src/expect.rs    expected-value files (CSV/JSONL) as a comparison side
+src/vcd.rs       minimal VCD writer used by `cut`
+src/cmd/         info, scopes, signals, signal, clock, config, value, changes, table, align, compare, cut
 ```

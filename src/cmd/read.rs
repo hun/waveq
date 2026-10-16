@@ -101,11 +101,14 @@ pub fn value(app: &App, at: Option<&str>, cycle: Option<i64>, signals: &[String]
         (Some(spec), None) => (parse_time(spec, ts)?, None),
         (None, Some(c)) => {
             let info = require_clock(app, &mut wf)?;
-            let tick = info.tick_of(c).ok_or_else(|| {
+            let origin = super::resolve_anchor(app, &mut wf, &info)?;
+            let last = info.last_cycle() - origin;
+            let local = c + origin;
+            let tick = info.tick_of(local).ok_or_else(|| {
                 anyhow::anyhow!(
                     "cycle {c} is out of range for clock \"{}\" (0..{})",
                     info.full_name,
-                    info.last_cycle()
+                    last
                 )
             })?;
             (tick, Some(c))
@@ -117,8 +120,14 @@ pub fn value(app: &App, at: Option<&str>, cycle: Option<i64>, signals: &[String]
         Some(c) => c,
         None => {
             match clock::resolve_clock(&mut wf, app.clock_spec.as_deref(), app.edge, app.quiet) {
-                Ok(Some(info)) => info.cycle_of(tick),
-                _ => -1,
+                Ok(Some(info)) => {
+                    let origin = super::resolve_anchor(app, &mut wf, &info)?;
+                    info.cycle_of(tick) - origin
+                }
+                _ => {
+                    super::guard_single_dump(app)?;
+                    -1
+                }
             }
         }
     };
@@ -196,6 +205,13 @@ pub fn changes(
     let ts = wf.hierarchy().timescale();
 
     let clock_info = clock::resolve_clock(&mut wf, app.clock_spec.as_deref(), app.edge, app.quiet)?;
+    let origin = match &clock_info {
+        Some(info) => super::resolve_anchor(app, &mut wf, info)?,
+        None => {
+            super::guard_single_dump(app)?;
+            0
+        }
+    };
     if clock_info.is_none() {
         app.note("changes: --clock none: printing ticks/times only (no cycle column)");
     }
@@ -244,7 +260,10 @@ pub fn changes(
             if no_initial && initial {
                 continue;
             }
-            let cycle = clock_info.as_ref().map(|c| c.cycle_of(tick)).unwrap_or(-1);
+            let cycle = clock_info
+                .as_ref()
+                .map(|c| c.cycle_of(tick) - origin)
+                .unwrap_or(-1);
             if let Some(a) = from_cycle
                 && cycle < a
             {
@@ -452,6 +471,13 @@ pub fn table(
     }
     let ts = wf.hierarchy().timescale();
     let clock_info = clock::resolve_clock(&mut wf, app.clock_spec.as_deref(), app.edge, app.quiet)?;
+    let origin = match &clock_info {
+        Some(info) => super::resolve_anchor(app, &mut wf, info)?,
+        None => {
+            super::guard_single_dump(app)?;
+            0
+        }
+    };
 
     // `--time` bounds become cycle bounds when a clock is available
     if let (Some(info), Some(range)) = (clock_info.as_ref(), time.as_deref()) {
@@ -459,12 +485,17 @@ pub fn table(
             bail!("--time and --cycles are mutually exclusive");
         }
         let (a, b) = parse_time_range(range, ts)?;
-        let (ca, cb) = (info.cycle_of(a), info.cycle_of(b));
+        let (ca, cb) = (info.cycle_of(a) - origin, info.cycle_of(b) - origin);
         if ca < 0 || cb < 0 {
             bail!(
-                "cycle range starts before the first clock edge (first edge at {} (tick {}))",
+                "cycle range starts before the first clock edge (first edge at {} (tick {})){}",
                 fmt_time(ts, info.edges[0]),
-                info.edges[0]
+                info.edges[0],
+                if origin > 0 {
+                    "; --anchor moved cycle 0 later than that"
+                } else {
+                    ""
+                }
             );
         }
         cycles = Some(format!("{ca}..{cb}"));
@@ -475,13 +506,14 @@ pub fn table(
 
     match clock_info {
         Some(info) => {
+            let last_logical = info.last_cycle() - origin;
             let (mut a, mut b) = match (&cycles, at_cycle) {
                 (Some(range), _) => parse_cycle_range(range, "--cycles")?,
                 (None, Some(c)) => {
                     let k = context.unwrap_or(0).max(0);
                     (c - k, c + k)
                 }
-                (None, None) => (0, info.last_cycle()),
+                (None, None) => (0, last_logical),
             };
             if let Some(f) = from_cycle {
                 a = a.max(f);
@@ -489,17 +521,21 @@ pub fn table(
             if let Some(t) = to_cycle {
                 b = b.min(t);
             }
-            if a < 0 {
+            // cycles below this bound do not exist in the file: local cycle
+            // `origin` is logical 0, so logical cycles start at `-origin`
+            let first_logical = 0.max(-origin);
+            if a < first_logical {
                 bail!(
-                    "cycle range starts before the first clock edge (first edge at {} (tick {}))",
-                    fmt_time(ts, info.edges[0]),
-                    info.edges[0]
+                    "cycle range starts before the first clock edge (local cycle {origin} at {} (tick {})); \
+                     the first cycle here is {first_logical}",
+                    fmt_time(ts, info.edges[origin.max(0) as usize]),
+                    info.edges[origin.max(0) as usize]
                 );
             }
             if b < a {
                 bail!("empty cycle range {a}..{b}");
             }
-            b = b.min(info.last_cycle());
+            b = b.min(last_logical);
             let mut columns = vec!["cycle".to_string(), "time".to_string(), "tick".to_string()];
             for handle in &handles {
                 columns.push(handle.full_name.clone());
@@ -515,11 +551,11 @@ pub fn table(
                     break;
                 }
                 written += 1;
-                let tick = info.edges[c as usize];
+                let tick = info.edges[(c + origin) as usize];
                 let mut values = Map::new();
                 let mut text = vec![c.to_string(), format_time(tick, ts), tick.to_string()];
                 for handle in &handles {
-                    let cell = handle.cell_at_cycle(&wf, &info.edges, c);
+                    let cell = handle.cell_at_cycle(&wf, &info.edges, c + origin);
                     values.insert(handle.full_name.clone(), signal_value_json(&cell, handle));
                     text.push(cell.text(handle.radix, handle.signed));
                 }

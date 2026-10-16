@@ -4,6 +4,15 @@ use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 use crate::format::{AlignMode, CmpMode, Edge, Radix, XMode};
+
+/// Where `compare --probe` samples its signals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ProbeAt {
+    /// The cycle that produced the expected value (shift-shifted A cycle)
+    ACycle,
+    /// The divergent cycle as observed on side B
+    BCycle,
+}
 use crate::output::Format;
 
 #[derive(Parser, Debug)]
@@ -24,9 +33,38 @@ pub struct Cli {
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct Global {
-    /// Wave file (VCD, FST or GHW)
+    /// Wave file (VCD, FST or GHW) — side A
     #[arg(short = 'f', long, global = true, value_name = "PATH")]
     pub file: Option<PathBuf>,
+
+    /// Second wave file holding side B (default: side B is in -f)
+    #[arg(long, global = true, value_name = "PATH")]
+    pub b_file: Option<PathBuf>,
+
+    /// Default expected-value file for `--map A=@:cycle,value` B sides
+    #[arg(long, global = true, value_name = "PATH")]
+    pub expect_file: Option<PathBuf>,
+
+    /// Clock signal for side A (`none` = tick/time only)
+    #[arg(long, global = true, value_name = "NAME|none")]
+    pub b_clock: Option<String>,
+
+    /// Skip the first N cycles of side B (align two runs with different preamble)
+    #[arg(long, global = true, value_name = "N", allow_hyphen_values = true)]
+    pub b_cycle_offset: Option<i64>,
+
+    /// Skip the first N cycles of side A (e.g. reading a `cut` window with the
+    /// source's cycle numbers: `--cycle-offset 2040`)
+    #[arg(long, global = true, value_name = "N", allow_hyphen_values = true)]
+    pub cycle_offset: Option<i64>,
+
+    /// Logical cycle 0 of side A is the first cycle where NAME is 1
+    #[arg(long, global = true, value_name = "NAME")]
+    pub anchor: Option<String>,
+
+    /// Logical cycle 0 of side B is the first B cycle where NAME is 1
+    #[arg(long, global = true, value_name = "NAME")]
+    pub b_anchor: Option<String>,
 
     /// Explicit config file (default: first .waveq.toml from CWD upward)
     #[arg(long, global = true, value_name = "PATH")]
@@ -111,6 +149,9 @@ pub enum Command {
         /// Print only the number of matching signals
         #[arg(long)]
         count: bool,
+        /// Print the scope tree instead of a flat list
+        #[arg(long)]
+        tree: bool,
     },
 
     /// Details about one signal
@@ -201,17 +242,42 @@ pub enum Command {
         query: Option<String>,
     },
 
+    /// Write a windowed copy of a dump as VCD (small fixture for a failure)
+    Cut {
+        /// Cycle range A..B (logical cycles of the resolved clock)
+        #[arg(long, value_name = "A..B")]
+        cycles: Option<String>,
+        /// First cycle of the range
+        #[arg(long, value_name = "N", allow_hyphen_values = true)]
+        from_cycle: Option<i64>,
+        /// Last cycle of the range
+        #[arg(long, value_name = "N", allow_hyphen_values = true)]
+        to_cycle: Option<i64>,
+        /// Signals to keep (repeatable, comma separated, @group allowed; globs ok)
+        #[arg(long, value_delimiter = ',', value_name = "NAME")]
+        signal: Vec<String>,
+        /// Write to FILE instead of stdout
+        #[arg(short = 'o', long, value_name = "FILE")]
+        output: Option<PathBuf>,
+        /// Include every signal in the file (default when --signal is omitted)
+        #[arg(long)]
+        all: bool,
+    },
+
     /// Scan shifts for the alignment with the fewest mismatches
     Align {
-        /// Silver/reference signal
+        /// Silver/reference signal (side A)
         #[arg(long, value_name = "SPEC")]
         a: String,
-        /// DUT/optimized signal
+        /// DUT/optimized signal (side B)
         #[arg(long, value_name = "SPEC")]
         b: String,
         /// Compare units
         #[arg(long, value_enum, value_name = "cycles|transfers")]
         align: Option<AlignMode>,
+        /// Treat |b - a| > N as a mismatch (numeric comparison against a bound)
+        #[arg(long, value_name = "N", allow_hyphen_values = true)]
+        max_delta: Option<i128>,
         /// Shift range A..=B
         #[arg(long, value_name = "A..=B")]
         shifts: Option<String>,
@@ -264,6 +330,31 @@ pub enum Command {
         /// Override the shift of every pair (including a --check's pair)
         #[arg(long, value_name = "N")]
         shift: Option<u32>,
+        /// Pair every signal matching GLOB on side A with its same-leaf twin on
+        /// the pattern's right-hand scope: --pair-scopes dut,ref --pair-by leaf
+        #[arg(long, value_name = "PREFIX")]
+        pair_scopes: Option<String>,
+        /// Pairing rule for --pair-scopes (only `leaf` today)
+        #[arg(long, value_name = "leaf")]
+        pair_by: Option<String>,
+        /// Pair all signals matching GLOB_A on side A with GLOB_B on side B,
+        /// matched by leaf name: --map-glob 'dut.*=ref.*'
+        #[arg(long, value_name = "GLOB_A=GLOB_B")]
+        map_glob: Vec<String>,
+        /// Add delta/bits_differ columns to divergence rows
+        #[arg(long)]
+        delta: bool,
+        /// Treat |b - a| > N as a divergence (numeric comparison against a bound)
+        #[arg(long, value_name = "N", allow_hyphen_values = true)]
+        max_delta: Option<i128>,
+        /// Which cycle the --probe columns are sampled at
+        #[arg(
+            long,
+            value_enum,
+            value_name = "a_cycle|b_cycle",
+            default_value = "a-cycle"
+        )]
+        probe_at: ProbeAt,
         /// Pick the best shift per pair automatically
         #[arg(long)]
         auto_shift: bool,

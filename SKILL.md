@@ -1,6 +1,6 @@
 ---
 name: waveq
-description: Query VCD/FST/GHW waveform dumps from the CLI instead of writing an ad-hoc parser. Use to find signals and the clock, sample values by cycle, list value changes, tabulate cycles, and locate the first divergent cycle or transfer between a golden model and a pipelined DUT (align/compare).
+description: Query VCD/FST/GHW waveform dumps from the CLI instead of writing an ad-hoc parser. Use to find signals and the clock, sample values by cycle, list value changes, tabulate cycles, compare a golden model against a DUT across many signal pairs (align/compare, two dumps or a golden-value file, delta/bit masks), and cut a small VCD window out of a huge dump.
 ---
 
 # waveq — waveform queries for RTL debugging agents
@@ -23,7 +23,20 @@ vectors are merged by wellen into derived signals.
   (default `posedge`), cycle 0 = first edge in the file. **Sampling is
   post-edge**: a register that loads exactly at the edge is visible in that
   cycle. A tick before the first edge has no cycle (`-` in text, `null` in
-  JSON).
+  JSON). `--anchor NAME` redefines cycle 0 as the first cycle where `NAME` is
+  `1`; it shifts *every* cycle-indexed command, so `compare` and the following
+  `table`/`changes` always agree (the header then reports `a_cycle_origin`).
+* **Two sides**: `-f` is side A. Side B is either a second dump (`--b-file`,
+  with `--b-clock` for its own clock) or a file of expected values
+  (`--map A=@golden.csv:cycle,value`). `--b-cycle-offset N` skips B's first `N`
+  cycles and `--b-anchor NAME` redefines B's cycle 0, for runs with different
+  preambles. `--b-*` flags are rejected by the single-dump commands instead of
+  being ignored.
+* **Shifting cycle numbers**: `--cycle-offset N` (side A) and `--b-cycle-offset N`
+  (side B) skip a file's first `N` cycles, so local cycle `N` is reported as
+  cycle 0 and cycle `local + N` as `local`... in other words every reported cycle
+  is the local cycle minus `N`. A window written by `cut` can therefore be read
+  with the source's numbering via `--cycle-offset -<from_cycle>`.
 * **Times**: `<N><unit>` (`10ns`, `1.5us` is rejected — only integers) converts
   exactly to ticks; a bare integer is a tick count. Conversions that are not an
   integral number of ticks are errors, never rounded. Output times use the
@@ -88,13 +101,56 @@ vectors are merged by wellen into derived signals.
    new transfer, so counting `ov` alone during a stall produces phantom
    divergences.
 
+## The composition workflow (many signals, one dump)
+
+When a golden model is a *structural composition* of the same blocks as the DUT
+(one dump, two scopes, same leaf names), the question is not "what is the
+latency" but "which internal signal goes wrong first":
+
+1. Pair every stage in one command instead of writing 20 `--map`s:
+   ```sh
+   waveq -f dump.vcd compare --pair-scopes dut,ref --shift 0
+   ```
+   (equivalent: `--map-glob 'dut.*=ref.*'`, or, in the config,
+   `[compare.pairs]` with `"dut.*" = "ref.*"`). Signals that exist on one side
+   only are reported (`unpaired_a_signals`, `unpaired_b_signals` plus a stderr
+   note) — a missing pair would otherwise be a missing answer. Pairing is by
+   leaf name; with repeated leaf names (e.g. `dut.lane0.x` and `dut.lane1.x`)
+   the command says so and `--pair-by path` pairs by relative path instead.
+2. Read the `pairs:` table's `first_divergent_cycle` column and sort by it: the
+   earliest divergent stage is the first candidate, everything later is usually
+   propagation. `waveq -f dump.vcd signals --tree` shows the scope structure
+   that the pairing is built on.
+3. Add magnitude with `--delta`: rows carry `delta` (`b - a`, each side
+   interpreted with its own signedness) and `bits_differ` (`a xor b` as hex);
+   the `pairs:` table carries `max_abs_delta` and `max_bits_differ`. "Off by
+   one sample" and "one bit flipped" then look different immediately.
+4. Turn a metric into the rule where that is what you mean: `--max-delta N`
+   treats `|b - a| > N` as the divergence instead of exact equality
+   (the header echoes the rule), which is how a documented tolerance is
+   expressed.
+5. Walk the bug back stage by stage: pair the stage's own *inputs* next (they
+   should be equal if the stage above them is), and read the mechanism with
+   `table --cycles A..B --signal <both sides + the enable>`; `--probe-at
+   b-cycle` samples probes at the divergent cycle, `--probe-at a-cycle`
+   (default) at the cycle that produced the expected value.
+6. Dump the driven inputs (`ce`, `rst`, `tvalid`, `tready`) into the same file.
+   A dump with only internal signals cannot say "this diverged on the first
+   stall", and `table` rows stay uninterpretable without them.
+7. When the recovery is worth keeping: `waveq -f big.vcd cut --cycles A..B
+   --signal 'dut.*,ref.*,tb.ce' -o small.vcd` writes a small self-contained
+   dump (the resolved clock is always included so the cycle numbers survive),
+   ready to attach to a bug report or commit as a regression fixture.
+
 ## Commands
 
 Global options work before or after the subcommand:
-`-f/--file PATH`, `--config PATH`, `--no-config`, `--clock NAME|none`,
-`--edge posedge|negedge|both`, `--radix auto|bin|hex|oct|dec`, `--signed`,
-`--unsigned`, `--signed-sig NAME`, `--unsigned-sig NAME`,
-`--format text|json|jsonl`, `--max-rows N`, `--quiet`.
+`-f/--file PATH`, `--b-file PATH`, `--config PATH`, `--no-config`,
+`--clock NAME|none`, `--b-clock NAME`, `--b-cycle-offset N`, `--anchor NAME`,
+`--b-anchor NAME`, `--expect-file PATH`, `--edge posedge|negedge|both`,
+`--radix auto|bin|hex|oct|dec`, `--signed`, `--unsigned`,
+`--signed-sig NAME`, `--unsigned-sig NAME`, `--format text|json|jsonl`,
+`--max-rows N`, `--quiet`.
 
 `--format text` prints `key: value` header lines and one aligned table;
 `json` prints one document; `jsonl` prints one object per line, starting with a
@@ -116,6 +172,7 @@ under their own key/record name.
 | `table` | per-cycle table of sampled signals |
 | `align` | shift scan: mismatches per candidate shift |
 | `compare` | compare pairs, report every divergent cycle/transfer |
+| `cut` | write a cycle window of a dump as a small VCD |
 
 ### info
 
@@ -158,8 +215,11 @@ tb_top.q2 9     reg      unknown   bitvector(9) false  8:0
 tb_top.q3 9     reg      unknown   bitvector(9) false  8:0
 ```
 
-`--count` prints only `count: N`. `twos/complement` types are not invented: use
-`--signed` or `[types]`.
+`--count` prints only `count: N`. `--tree` prints the scope structure with
+direct counts and indents each signal under its scope — the fastest way to see
+which `dut.*`/`ref.*` names can be paired (and `--scope PREFIX` roots the tree
+at one scope). `twos/complement` types are not invented: use `--signed` or
+`[types]`.
 
 ### signal
 
@@ -271,8 +331,40 @@ Transfers mode (`--align transfers --in-valid X [--in-ready Y] --out-valid Z
 [--out-ready W]`) compares event `k` of the A stream with event `k+shift` of the
 B stream; `--gate` is rejected there. `best_shift` = smallest shift with the
 fewest mismatches; `ambiguous: true` means several shifts align equally well, so
-the latency is not identifiable from this pair. Exit `0` when
-`best_mismatches == 0`, else `1`.
+the latency is not identifiable from this pair. Each row carries
+`max_abs_delta`, and `--max-delta N` makes `|b - a| > N` the mismatch rule (a
+shift scan against a documented tolerance rather than exact equality). Exit `0`
+when `best_mismatches == 0`, else `1`.
+
+### cut
+
+```
+waveq -f big.vcd cut --cycles 2040..2100 --signal 'dut.*,ref.*,tb.ce,tb.rst' -o small.vcd
+file: big.vcd
+clock: tb.clk
+from_cycle: 2040
+to_cycle: 2100
+from_tick: 20405
+to_tick: 21005
+signals: 84
+changes: 1747
+output: small.vcd
+```
+
+`--signal` accepts specs, `@group`, and globs (`*`/`?`); `--all` or no
+`--signal` keeps every signal. Bounds are never clamped — a cycle outside the
+dump is an error. The resolved clock is always included so the cut keeps the
+same cycle numbering. Without `-o` the VCD goes to **stdout** and the summary to
+stderr, so `waveq cut … > small.vcd` stays clean for every `--format`.
+Bit-sliced selections (`NAME[msb:lsb]`) are rejected rather than silently
+widened.
+
+The cut keeps an edge that falls exactly on the window start, so its cycle 0 is
+the source's `from_cycle`. To read the window with the source's
+cycle numbers (e.g. to paste the same `--cycles` bounds), pass
+`--cycle-offset -<from_cycle>`; the summary prints a ready-to-paste `read_with`
+line. Values are copied, never resampled: ticks, timescale and bit patterns are
+the source's.
 
 ### compare
 
@@ -298,10 +390,23 @@ pair a            b         shift align  compared mismatches x_involved skipped 
 * `--x mismatch` (default) counts an `x`/`z`-involved unit as a divergence
   labeled `x-involved`; `--x wildcard` treats it as neither a match nor a
   divergence but still counts `x_involved`.
-* `--probe NAME` adds a column per signal sampled at the row's A-side cycle
-  (the cycle that produced the expected value); `--at-edges-only` keeps only
-  rows whose values changed exactly at an edge; `--first-only`/`--max-rows`
-  (default 20) trim rows.
+* `--probe NAME` adds a column per signal sampled at the row's A-side cycle by
+  default; `--probe-at b-cycle` samples at the divergent (DUT) cycle instead,
+  which is what you want when reading `ce`/`tready` *at* the divergence.
+  `--at-edges-only` keeps only rows whose values changed exactly at an edge;
+  `--first-only`/`--max-rows` (default 20) trim rows.
+* `--pair-scopes A,B` / `--pair-by leaf|path` / `--map-glob 'A.*=B.*'` build
+  many pairs from matching names (see the composition workflow above).
+* `--delta` adds `delta` and `bits_differ` columns; every pair always reports
+  `max_abs_delta` and `max_bits_differ`.
+* `--max-delta N` makes `|b - a| > N` the divergence rule (numeric
+  interpretation of bit-vectors, even with the default `--cmp bit-exact`).
+* Side B can be a file of golden values instead of a signal:
+  `--map dut.dout=@golden.csv:cycle,dout` (CSV/JSONL, `--expect-file PATH` lets
+  you write `--map dut.dout=@:cycle,dout`). Covers the "the model logged its
+  outputs" case; values are validated up front (a value that does not fit the
+  compared width is an error, not a silent skip) and cycles the file does not
+  cover are counted as `skipped`, never as matches.
 
 ## Config file (`.waveq.toml`)
 
@@ -312,8 +417,13 @@ discovered config is used, `using config PATH` is printed to stderr
 
 ```toml
 [wave]
-file   = "sim/dump.fst"      # default for -f
+file   = "sim/dump.fst"      # default for -f (side A)
+b_file = "model.vcd"         # default for --b-file (side B)
 clock  = "tb_top.clk"        # default for --clock
+b_clock = "tb.clk"           # default for --b-clock
+b_cycle_offset = 3           # skip side B's first N cycles
+anchor  = "tb_top.start"     # logical cycle 0 of side A
+b_anchor = "tb.start"        # logical cycle 0 of side B
 edge   = "posedge"           # posedge|negedge|both
 
 [compare]                    # defaults for align/compare
@@ -321,11 +431,17 @@ align     = "cycles"         # cycles|transfers
 cmp       = "bit-exact"      # bit-exact|numeric
 x         = "mismatch"       # mismatch|wildcard
 max_shift = 16
+max_delta = 0                # treat |b - a| > N as a divergence
+delta     = true             # add delta / bits_differ columns
+expect_file = "golden.csv"   # default for `--map A=@:cycle,value`
 in_valid  = "tb_top.in_valid"   # transfers mode
 in_ready  = "tb_top.in_ready"   # optional
 out_valid = "tb_top.out_go"     # transfers mode
 out_ready = "tb_top.out_ready"  # optional
 gate      = "tb_top.in_valid"   # cycles mode
+
+[compare.pairs]              # pair every matching name, like --map-glob
+"dut.*" = "ref.*"
 
 [types]                      # rendering/signedness overrides (specs or globs)
 "tb_top.sn"        = { signed = true, radix = "dec" }
@@ -345,7 +461,8 @@ pipeline = { signals = ["tb_top.ref_y", "tb_top.q1"], context = 3 }
 Unknown keys are errors (`unknown config key "x"`). `[checks]` accepts every
 `compare` option (`a`, `b`, `shift`, `auto_shift`, `max_shift`, `align`, `cmp`,
 `x`, `gate`, `in_valid`, `in_ready`, `out_valid`, `out_ready`, `from_cycle`,
-`to_cycle`, `from`, `to`, `probe`, `at_edges_only`); `[queries]` accepts
+`to_cycle`, `from`, `to`, `probe`, `probe_at`, `at_edges_only`, `pairs`,
+`max_delta`, `delta`, `map_glob`, `pair_scopes`, `pair_by`); `[queries]` accepts
 `signals`, `context`, `cycles`, `from_cycle`, `to_cycle`, `at_cycle`.
 `[types]` keys are exact signal specs (winner) or globs (first match in file
 order).
@@ -365,6 +482,9 @@ order).
 | `cmp: x-involved` | unknown bits in the dump (uninitialised memory, no reset) | `value --at T --signal S --radix bin`, or `--x wildcard` to ignore |
 | Values that look 2×/256× off, negatives shown as big positives | wrong radix/signedness | `signals` column `signed`, `signal` field `signed_source` |
 | `unpaired` differs between two runs | swallowed or duplicated transfer | transfers-mode summary `a_events`/`b_events`/`unpaired` |
+| Two dumps disagree everywhere at every shift | different reset length / preamble | `--anchor NAME` (one per side), `--b-cycle-offset N`, then `align --shifts 0..=8` |
+| `unpaired_a_signals`/`unpaired_b_signals` non-empty | a signal exists on one side only (rename/omission) | `signals --tree --match '*<name>*'` on both sides; `--pair-by path` if leaves repeat |
+| Delta is huge but only a few bits differ | scale/sign mismatch between the two sides | `--delta` (`max_bits_differ`) and `--signed`/`[types]` |
 | `no clock found` | no name match and no busy 1-bit signal | `clock` candidate list, then `--clock NAME` or `[wave] clock` |
 
 ## Format conversion
@@ -377,9 +497,64 @@ vcd file dump.vcd ; vcd add -r /tb/* ; run -all
 # Icarus Verilog:  $dumpfile("dump.vcd"); $dumpvars(0, tb);
 # GHDL:            ghdl -r tb --wave=dump.ghw --stop-time=1us
 # Verilator:       --trace (VCD) / --trace-fst (FST)
-# vcd2fst dump.vcd dump.fst        # smaller and much faster to read
 # gtkwave/surfer can export VCD from many sources
 ```
+
+### Turn a big VCD into an FST first
+
+Most tools dump VCD by default, but VCD is verbose and slow to read; FST is much
+smaller and faster, and waveq reads it identically (same values, cycles, times —
+VCD/FST parity is covered by the test suite). `vcd2fst` is installed at
+`~/.local/bin/vcd2fst`:
+
+```sh
+vcd2fst dump.vcd dump.fst          # lz4 packing by default (-4, fastest write)
+vcd2fst -Z dump.vcd small.fst      # zlib packing: smallest file
+waveq -f dump.fst compare --pair-scopes dut,ref --shift 0
+```
+
+Measured on a 2 MB / 4036-cycle / 87-signal dump: `vcd2fst` gives **55 kB (35×
+smaller)**, and reading the whole body takes ~0.01 s instead of 0.05 s
+(`waveq info --full`). The comparison itself is dominated by sampling, so the
+gap grows with dump size — convert before a long session, and keep the VCD only
+as the archive copy. The conversion is lossless.
+
+### Dumping a golden model next to the DUT into one VCD
+
+Two independent writers into one file (a Verilator DUT plus a C++/Python model)
+gives one dump with both sides, which is the cheapest way to compare them — and
+it is what `compare --pair-scopes dut,ref` is built for.
+
+For C++ models use **[vcd-writer](https://github.com/favorart/vcd-writer)** (a
+C++ port of PyVCD): a local clone lives at `~/git_extern/vcd-writer/` with the
+headers in `include/`, wired in via `CPMAddPackage(NAME libvcdwriter
+GITHUB_REPOSITORY favorart/vcd-writer …)`. Register the model's signals in the
+same dump as the DUT, under a separate scope:
+
+```cpp
+// once: both sides, same leaf names, different scopes
+HeadPtr head = makeVCDHeader(TimeScale::ONE, TimeScaleUnit::ns, "2026-01-01");
+VCDWriter w("dump.vcd", head);
+auto clk = w.register_var("tb",  "clk", VariableType::wire, 1);
+auto a0d = w.register_var("dut", "a0",  VariableType::wire, 18);
+auto a0r = w.register_var("ref", "a0",  VariableType::wire, 18);
+// per cycle: post-edge samples (waveq samples post-edge), one clock pump
+w.change(clk, 10*c,     "0");  w.change(clk, 10*c + 5, "1");
+w.change(a0d, 10*c + 5, bits(dut_signal, 18));
+w.change(a0r, 10*c + 5, bits(model_value, 18));
+```
+
+* dump the **post-edge** state on both sides, otherwise every pair looks shifted
+  by one cycle (`compare` rows show `a_change_time`/`b_change_time` if unsure);
+* provide a clock variable named `*clk*`/`*clock*` (or pass `--clock`);
+* VCD has no signedness: use `--signed` or `[types]` in the config;
+* emit the port's width, MSB first, two's complement for negatives — then
+  `--cmp bit-exact` means something and `--cmp numeric` stays available.
+
+If the two sides cannot share a process, dump them to **two files** and let
+waveq join them: `--b-file` for the second dump, `--b-clock`/`--b-anchor`/
+`--b-cycle-offset` to align the timelines; or write the model's per-cycle
+output to CSV/JSONL and use `--map dut.dout=@golden.csv:cycle,dout`.
 
 WDB, WLF (Vivado/ModelSim native) and FSDB (Verdi) are closed formats and are
 **not** read by waveq; dump to VCD/FST/GHW instead. Bounded windows help: a
@@ -388,6 +563,10 @@ WDB, WLF (Vivado/ModelSim native) and FSDB (Verdi) are closed formats and are
 
 ## Notes for agents
 
+* Before analysing a large dump, convert it: `vcd2fst big.vcd big.fst` (see
+  [above](#turn-a-big-vcd-into-an-fst-first)) — same results, far less time.
+* When a testbench has to be instrumented to dump a model's signals next to the
+  DUT, `~/git_extern/vcd-writer/` (C++, `include/`) is the library to pull in.
 * Prefer `--format jsonl` for streaming: `header`, then `row`s, then `footer`.
 * Cycle-indexed numbers are only meaningful together with the clock they came
   from; `align`/`compare`/`table` echo `clock`/`edge` in their header.

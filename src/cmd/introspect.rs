@@ -222,12 +222,16 @@ pub fn signals(
     matches: &[String],
     scope: Option<&str>,
     count_only: bool,
+    tree: bool,
 ) -> Result<Doc> {
     let path = app.require_file()?;
     let hd = load::header(path, &load::load_options())?;
     let h = &hd.hierarchy;
     let sign = app.sign_args(h)?;
     let max_rows = app.max_rows(500);
+    if tree && !count_only {
+        return signals_tree(app, h, matches, scope, max_rows);
+    }
 
     let mut table = Table::new(vec![
         "full_name".to_string(),
@@ -447,6 +451,224 @@ pub fn clock(app: &App, list_only: bool) -> Result<Doc> {
         .field(Field::b("regular", info.regular()))
         .field(Field::s("detected_by", info.detected_by.name()));
     Ok(doc.table(table))
+}
+
+/// `signals --tree`: the scope structure with direct counts, useful for spotting
+/// the `dut.*`/`ref.*` twins that `compare --pair-scopes` pairs up.
+fn signals_tree(
+    app: &App,
+    h: &Hierarchy,
+    matches: &[String],
+    scope: Option<&str>,
+    max_rows: Option<usize>,
+) -> Result<Doc> {
+    let sign = app.sign_args(h)?;
+    let mut table = Table::new(vec![
+        "name".to_string(),
+        "kind".to_string(),
+        "width".to_string(),
+        "var_type".to_string(),
+        "encoding".to_string(),
+        "signed".to_string(),
+    ]);
+    let mut emitted = 0usize;
+    let mut omitted = 0usize;
+    let mut kept_signals = 0usize;
+
+    #[allow(clippy::too_many_arguments)]
+    fn walk(
+        app: &App,
+        h: &Hierarchy,
+        sign: &crate::resolve::SignArgs,
+        matches: &[String],
+        table: &mut Table,
+        emitted: &mut usize,
+        omitted: &mut usize,
+        kept_signals: &mut usize,
+        max_rows: Option<usize>,
+        depth: usize,
+        name: &str,
+        full_name: &str,
+        scope_ref: Option<wellen::ScopeRef>,
+    ) -> Result<()> {
+        // prune scopes with no matching signal below them
+        let any = match scope_ref {
+            Some(s) => {
+                let mut found = false;
+                for v in h[s].all_vars(h) {
+                    let name = resolve::var_full_name(h, v);
+                    if matches.is_empty() || resolve::matches_any(matches, &name)? {
+                        found = true;
+                        break;
+                    }
+                }
+                found
+            }
+            None => true,
+        };
+        if !any {
+            return Ok(());
+        }
+        let emit_scope_line = scope_ref.is_some() || !name.is_empty();
+        let indent = "  ".repeat(depth);
+        let (vars, scopes) = match scope_ref {
+            Some(s) => (h[s].vars(h).count(), h[s].scopes(h).count()),
+            None => (h.vars().count(), h.scopes().count()),
+        };
+        if !emit_scope_line {
+            // the implicit root is not a scope line
+        } else if let Some(max) = max_rows
+            && *emitted >= max
+        {
+            *omitted += 1;
+        } else {
+            *emitted += 1;
+            table.push(
+                vec![
+                    format!("{indent}{name}"),
+                    "scope".to_string(),
+                    format!("{vars}v/{scopes}s"),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                ],
+                json!({
+                    "record": "scope",
+                    "kind": "scope",
+                    "full_name": full_name,
+                    "name": name,
+                    "depth": depth,
+                    "vars": vars,
+                    "scopes": scopes,
+                }),
+            );
+        }
+        // direct signals
+        let vars_iter: Vec<wellen::VarRef> = match scope_ref {
+            Some(s) => h[s].vars(h).collect(),
+            None => h.vars().collect(),
+        };
+        for v in vars_iter {
+            let vname = resolve::var_full_name(h, v);
+            if !matches.is_empty() && !resolve::matches_any(matches, &vname)? {
+                continue;
+            }
+            *kept_signals += 1;
+            if let Some(max) = max_rows
+                && *emitted >= max
+            {
+                *omitted += 1;
+                continue;
+            }
+            *emitted += 1;
+            let (signed, _) = resolve::signedness(h, v, &vname, &vname, sign, &app.types);
+            let width = h[v].length(h);
+            table.push(
+                vec![
+                    format!("{indent}  {}", h[v].name(h)),
+                    "signal".to_string(),
+                    width
+                        .map(|w| w.to_string())
+                        .unwrap_or_else(|| "-".to_string()),
+                    var_type_name(h[v].var_type()).to_string(),
+                    encoding_text(h, v),
+                    signed.to_string(),
+                ],
+                json!({
+                    "record": "signal",
+                    "kind": "signal",
+                    "full_name": vname,
+                    "name": h[v].name(h),
+                    "depth": depth + 1,
+                    "width": width,
+                    "var_type": var_type_name(h[v].var_type()),
+                    "encoding": encoding_text(h, v),
+                    "signed": signed,
+                }),
+            );
+        }
+        // child scopes
+        let children: Vec<wellen::ScopeRef> = match scope_ref {
+            Some(s) => h[s].scopes(h).collect(),
+            None => h.scopes().collect(),
+        };
+        for child in children {
+            let cname = h[child].full_name(h);
+            let leaf = h[child].name(h).to_string();
+            walk(
+                app,
+                h,
+                sign,
+                matches,
+                table,
+                emitted,
+                omitted,
+                kept_signals,
+                max_rows,
+                depth + 1,
+                &leaf,
+                &cname,
+                Some(child),
+            )?;
+        }
+        Ok(())
+    }
+
+    match scope {
+        Some(prefix) => {
+            let target = h
+                .all_scopes()
+                .find(|s| scope_full_name(h, *s) == prefix)
+                .ok_or_else(|| anyhow::anyhow!("no scope \"{prefix}\" (see `waveq scopes`)"))?;
+            walk(
+                app,
+                h,
+                &sign,
+                matches,
+                &mut table,
+                &mut emitted,
+                &mut omitted,
+                &mut kept_signals,
+                max_rows,
+                0,
+                &scope_full_name(h, target),
+                &scope_full_name(h, target),
+                Some(target),
+            )?;
+        }
+        None => {
+            walk(
+                app,
+                h,
+                &sign,
+                matches,
+                &mut table,
+                &mut emitted,
+                &mut omitted,
+                &mut kept_signals,
+                max_rows,
+                0,
+                "",
+                "",
+                None,
+            )?;
+        }
+    }
+
+    let mut doc = Doc::new()
+        .field(Field::s("file", app.require_file()?.display().to_string()))
+        .field(Field::u("signals", kept_signals as u64))
+        .table(table);
+    if omitted > 0 {
+        app.note(&format!(
+            "signals: truncated to {} tree lines ({omitted} omitted, use --max-rows 0 for all)",
+            max_rows.unwrap_or(emitted)
+        ));
+        doc = doc
+            .trailer_field(Field::b("truncated", true))
+            .trailer_field(Field::u("omitted", omitted as u64));
+    }
+    Ok(doc)
 }
 
 pub fn config(app: &App) -> Result<Doc> {

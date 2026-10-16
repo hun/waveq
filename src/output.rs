@@ -143,6 +143,9 @@ pub struct Doc {
     pub header_record: bool,
     /// Process exit code contributed by this document (0 or 1).
     pub exit: u8,
+    /// Set by commands whose payload already went to stdout (`cut` without
+    /// `-o`): [`print`] then emits nothing, for every format.
+    pub suppress_output: bool,
 }
 
 impl Doc {
@@ -172,6 +175,12 @@ impl Doc {
 
     pub fn exit(mut self, value: u8) -> Doc {
         self.exit = value;
+        self
+    }
+
+    /// Mark the document as already written to stdout: [`print`] will skip it.
+    pub fn suppress_output(mut self, value: bool) -> Doc {
+        self.suppress_output = value;
         self
     }
 
@@ -295,6 +304,9 @@ impl Table {
 }
 
 pub fn print(doc: &Doc, format: Format) {
+    if doc.suppress_output {
+        return;
+    }
     print!("{}", doc.render(format));
 }
 
