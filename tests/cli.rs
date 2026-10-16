@@ -2307,21 +2307,23 @@ fn cut_rejects_the_rebasing_flags() {
     ]);
     out.expect_code(2).expect_stderr("not supported here");
 
-    // ... and the cut is read back with the source's numbering via --cycle-offset
+    // ... and a cut is read back with the source's numbering via --cycle-offset,
+    // in both the table and the comparison commands
     let path = std::env::temp_dir().join(format!("waveq_window_{}.vcd", std::process::id()));
     let out = vcd(&[
         "cut",
         "--cycles",
-        "11..12",
+        "10..13",
         "--signal",
-        "tb_top.q3",
+        "tb_top.ref_y,tb_top.q3",
         "-o",
         path.to_str().unwrap(),
     ]);
     out.expect_code(0);
     assert!(out.stdout.contains("read_with"), "{}", out.stdout);
-    assert!(out.stderr.contains("--cycle-offset -11"), "{}", out.stderr);
-    // a two-cycle window has fewer edges than clock auto-detection needs, so the
+    assert!(out.stderr.contains("--cycle-offset -10"), "{}", out.stderr);
+
+    // a four-cycle window has fewer edges than clock auto-detection needs, so the
     // clock is named explicitly (a real window is long enough not to care)
     let out = run(&[
         "-f",
@@ -2330,26 +2332,58 @@ fn cut_rejects_the_rebasing_flags() {
         "--clock",
         "tb_top.clk",
         "--cycle-offset",
-        "-11",
+        "-10",
         "table",
         "--cycles",
-        "11..12",
+        "10..13",
         "--signal",
-        "tb_top.q3",
+        "tb_top.ref_y,tb_top.q3",
         "--format",
         "json",
     ]);
     out.expect_code(0);
     let rows = table_rows(&out.json());
-    assert_eq!(rows[0]["cycle"], 11);
+    assert_eq!(rows[0]["cycle"], 10);
+    assert_eq!(rows[3]["cycle"], 13);
     assert_eq!(
-        rows[0]["values"]["tb_top.q3"]["bits"], "000100100",
-        "source cycle 11: q3 = ref_y[8] = 36"
+        rows[0]["values"]["tb_top.ref_y"]["bits"], "000101100",
+        "source cycle 10: ref_y = 44"
     );
     assert_eq!(
-        rows[1]["values"]["tb_top.q3"]["bits"], "000101000",
-        "source cycle 12: q3 = ref_y[9] = 40"
+        rows[3]["values"]["tb_top.q3"]["bits"], "000101101",
+        "source cycle 13: the corrupted q3 = 45"
     );
+
+    let out = run(&[
+        "-f",
+        path.to_str().unwrap(),
+        "--no-config",
+        "--clock",
+        "tb_top.clk",
+        "--cycle-offset",
+        "-10",
+        "compare",
+        "--map",
+        "tb_top.ref_y=tb_top.q3:3",
+        "--from-cycle",
+        "10",
+        "--to-cycle",
+        "13",
+        "--format",
+        "json",
+    ]);
+    out.expect_code(1);
+    let doc = out.json();
+    assert_eq!(doc["a_cycle_origin"], -10);
+    assert_eq!(
+        doc["pairs"][0]["compared"], 1,
+        "only cycle 10 has both sides in range"
+    );
+    assert_eq!(doc["pairs"][0]["first_divergent_cycle"], 13);
+    let row = &table_rows(&doc)[0];
+    assert_eq!(row["a_cycle"], 10);
+    assert_eq!(row["b_cycle"], 13);
+    assert_eq!(row["b"]["bits"], "000101101");
     std::fs::remove_file(&path).ok();
 }
 

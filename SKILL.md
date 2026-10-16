@@ -513,7 +513,7 @@ vcd2fst -Z dump.vcd small.fst      # zlib packing: smallest file
 waveq -f dump.fst compare --pair-scopes dut,ref --shift 0
 ```
 
-Measured on a 2 MB / 4036-cycle / 87-signal dump: `vcd2fst` gives **55 kB (35×
+Measured on a 2 MB / 4036-cycle / 112-signal dump: `vcd2fst` gives **55 kB (35×
 smaller)**, and reading the whole body takes ~0.01 s instead of 0.05 s
 (`waveq info --full`). The comparison itself is dominated by sampling, so the
 gap grows with dump size — convert before a long session, and keep the VCD only
@@ -556,6 +556,45 @@ waveq join them: `--b-file` for the second dump, `--b-clock`/`--b-anchor`/
 `--b-cycle-offset` to align the timelines; or write the model's per-cycle
 output to CSV/JSONL and use `--map dut.dout=@golden.csv:cycle,dout`.
 
+### FST-native tooling: `fst-tools` (`fstquery`, `fstprobe`, `fstclip`, `fstfind`)
+
+A checkout of [MaxXSoft/fst-tools](https://github.com/MaxXSoft/fst-tools) lives at
+`~/git_extern/fst-tools/` (build once with `git submodule update --init
+--recursive && cargo build --release --workspace`; binaries land in
+`target/release/`, they are not installed on `PATH`).
+
+They are **FST-only and time/tick-indexed**: they do not infer clock edges, clock
+cycles, delta cycles or the meaning of signal names — the cycle numbering waveq
+works in. What they add is *aggregation and search*:
+
+| tool | use it for | verified example |
+|---|---|---|
+| `fstquery` | event lists per signal, and **SQL over sampled state** (group-by, counts, sums, context windows, row/byte budgets) | `fstquery trace.fst --period 10 --phase 5 --sql 'SELECT COUNT(*) AS samples, SUM("tb.ce") AS ce_high FROM samples' --json` → `4036` samples, `3970` with `tb.ce` high |
+| `fstprobe` | metadata, hierarchy and variables as JSON (discover exact paths before a waveq run) | `fstprobe --format json -a trace.fst` |
+| `fstfind` | value search (fstminer-like, structured JSON) | `fstfind --format json trace.fst ...` |
+| `fstclip` | clip a window/signal subset **FST→FST** (lossless, smallest) | `fstclip in.fst out.fst --start 20405 --end 21005 -S '^(dut|ref|tb)\.'` → 55 kB → 3.8 kB |
+
+Division of labour: cycle numbers, clock-edge semantics, valid/transfer gating
+and golden-vs-DUT divergence scans are waveq (`table`, `changes`, `align`,
+`compare`); **aggregation** ("per-mode cycle counts", "retirements per PC",
+`GROUP BY`) is `fstquery` (`--sql` over the virtual `samples` table; `--period P
+--phase Q` samples ticks with `t % P == Q` — you must know the clock cadence).
+Their JSON reports completion explicitly (`scan_complete`, `output_truncated`) —
+check it before trusting a partial result, the same way waveq's `truncated`
+field and exit codes must be checked.
+
+Pick the clipper by what the consumer needs:
+
+* **`waveq cut`** (any format → VCD) reproduces an edge that falls exactly on the
+  window start, so the window's cycle 0 **is** the source's `from_cycle` and
+  `--cycle-offset -<from_cycle>` restores the source's numbering (tested).
+* **`fstclip`** (FST → FST, much smaller) rebases timestamps to zero; the value
+  at `--start` is kept, but a clock edge landing exactly on `--start` is not
+  reproduced, so the clip's first edge is the *next* one (verified on the fir
+  dump: `--start 20405` → first posedge at 10 ns). Read such a window in its own
+  frame (`waveq -f clip.fst clock` names the first edge) or label it with
+  `--cycle-offset -<that cycle>`; do not assume the source's numbers.
+
 WDB, WLF (Vivado/ModelSim native) and FSDB (Verdi) are closed formats and are
 **not** read by waveq; dump to VCD/FST/GHW instead. Bounded windows help: a
 10 GB FST is slow to read even when only 20 cycles matter — use
@@ -567,6 +606,10 @@ WDB, WLF (Vivado/ModelSim native) and FSDB (Verdi) are closed formats and are
   [above](#turn-a-big-vcd-into-an-fst-first)) — same results, far less time.
 * When a testbench has to be instrumented to dump a model's signals next to the
   DUT, `~/git_extern/vcd-writer/` (C++, `include/`) is the library to pull in.
+* For FST-only work that is *not* about cycles — value search, hierarchy JSON,
+  lossless FST clipping, and SQL aggregation over sampled state — use the
+  `fst-tools` binaries in `~/git_extern/fst-tools/target/release/`
+  (`fstquery`/`fstprobe`/`fstfind`/`fstclip`, see above).
 * Prefer `--format jsonl` for streaming: `header`, then `row`s, then `footer`.
 * Cycle-indexed numbers are only meaningful together with the clock they came
   from; `align`/`compare`/`table` echo `clock`/`edge` in their header.

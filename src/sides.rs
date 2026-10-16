@@ -164,12 +164,10 @@ pub fn resolve_origin(
         };
         origin += local;
     }
-    if origin < 0 {
-        bail!(
-            "side {}: negative cycle origin {origin} (anchor/offset combination)",
-            side.name()
-        );
-    }
+    // A negative origin is legitimate: it labels cycles that precede the file's
+    // first edge, which is how a re-based window (cut/fstclip) is read back with
+    // the source's cycle numbers. Cycles without a local counterpart are
+    // rejected by the bounds check, not here.
     Ok(origin)
 }
 
