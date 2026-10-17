@@ -16,12 +16,25 @@ pub fn load_options() -> LoadOptions {
 
 /// Header-only load: hierarchy, format, timescale, body length.
 pub fn header(path: &Path, opts: &LoadOptions) -> Result<viewers::HeaderResult<BufReader<File>>> {
+    check_readable(path)?;
     viewers::read_header_from_file(path, opts).map_err(|e| map_err(path, e))
 }
 
 /// Full load (header + body); signals are still loaded on demand.
 pub fn full(path: &Path, opts: &LoadOptions) -> Result<Waveform> {
+    check_readable(path)?;
     wellen::simple::read_with_options(path, opts).map_err(|e| map_err(path, e))
+}
+
+/// wellen's format detection opens the file with `File::open(..).expect(..)`
+/// *before* it can return a `WellenError`, so a missing or unreadable path
+/// aborts the process instead of reporting an error. Probe the path ourselves
+/// first: directories pass through (`File::open` succeeds) and are reported as
+/// an unknown format by wellen, as before.
+fn check_readable(path: &Path) -> Result<()> {
+    File::open(path)
+        .map(|_| ())
+        .map_err(|e| map_err(path, WellenError::Io(e)))
 }
 
 pub fn format_name(f: FileFormat) -> &'static str {

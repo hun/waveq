@@ -967,6 +967,17 @@ fn t10_error_paths() {
         .expect_stderr("unknown file format")
         .expect_stderr("log_vcd");
 
+    // A path that cannot be opened is an error, not a panic (wellen's format
+    // detection opens the file before it can report a WellenError).
+    let out = run(&["-f", "no/such/dump.vcd", "info"]);
+    out.expect_code(2)
+        .expect_stderr("io error reading no/such/dump.vcd")
+        .expect_stderr("No such file or directory");
+
+    let out = run(&["-f", "no/such/dump.fst", "table", "--signal", "x"]);
+    out.expect_code(2)
+        .expect_stderr("io error reading no/such/dump.fst");
+
     let out = run(&["-f", VCD, "--no-config", "clock", "--clock", "nope"]);
     out.expect_code(2).expect_stderr("no signal \"nope\"");
 
